@@ -53,6 +53,7 @@ import {
   Siren,
   Sun,
   TerminalSquare,
+  Wifi,
 } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -181,6 +182,19 @@ type DashboardToast = {
   onAction?: () => void;
 };
 
+type GatewayAgentEntry = {
+  id?: string;
+  name?: string;
+  workspace?: string;
+  default?: boolean;
+};
+
+type GatewaySessionEntry = {
+  id?: string;
+  key?: string;
+  state?: string;
+};
+
 const AUTH_ENABLED = true;
 const ISSUE_TYPES: IssueType[] = ["Bug", "Story", "Task", "Epic", "Spike", "Incident", "Improvement", "Chore"];
 const PRIORITIES: Priority[] = ["Highest", "High", "Medium", "Low", "Lowest"];
@@ -194,6 +208,7 @@ const navItems: NavItem[] = [
   { id: "metrics", label: "Statistics", icon: Activity },
   { id: "logs", label: "Agent Logs", icon: TerminalSquare },
   { id: "calendar", label: "Calendar", icon: CalendarClock },
+  { id: "gateway", label: "Gateway", icon: Wifi },
 ];
 
 const initialAgentProfiles: AgentProfile[] = [
@@ -812,6 +827,22 @@ export function OpenclawDashboard() {
   const [calendarView, setCalendarView] = useState<"month" | "week">("month");
   const [darkMode, setDarkMode] = useState(true);
   const [healthHoverOpen, setHealthHoverOpen] = useState(false);
+  const [gatewayUrl, setGatewayUrl] = useState("");
+  const [gatewayToken, setGatewayToken] = useState("");
+  const [gatewayPassword, setGatewayPassword] = useState("");
+  const [gatewayLoading, setGatewayLoading] = useState(false);
+  const [gatewayConnected, setGatewayConnected] = useState(false);
+  const [gatewayStatus, setGatewayStatus] = useState<string>("Not connected");
+  const [gatewayNodes, setGatewayNodes] = useState<AgentProfile[]>([]);
+  const [gatewaySessions, setGatewaySessions] = useState<GatewaySessionEntry[]>([]);
+  const [gatewayAgents, setGatewayAgents] = useState<GatewayAgentEntry[]>([]);
+  const [gatewayAgentId, setGatewayAgentId] = useState("");
+  const [gatewayAgentName, setGatewayAgentName] = useState("");
+  const [gatewayAgentWorkspace, setGatewayAgentWorkspace] = useState("");
+  const [gatewayDocPath, setGatewayDocPath] = useState("SOUL.md");
+  const [gatewayDocContent, setGatewayDocContent] = useState("");
+  const [gatewayDocReadMethod, setGatewayDocReadMethod] = useState("workspace.read");
+  const [gatewayDocWriteMethod, setGatewayDocWriteMethod] = useState("workspace.write");
 
   const [tasks, setTasks] = useState<Task[]>([]);
   const [issues, setIssues] = useState<Issue[]>([]);
@@ -903,6 +934,40 @@ export function OpenclawDashboard() {
   useEffect(() => {
     document.documentElement.classList.toggle("dark", darkMode);
   }, [darkMode]);
+
+  useEffect(() => {
+    const raw = window.localStorage.getItem("agenticos.gateway.settings");
+    if (!raw) return;
+    try {
+      const parsed = JSON.parse(raw) as {
+        url?: string;
+        token?: string;
+        password?: string;
+        readMethod?: string;
+        writeMethod?: string;
+      };
+      setGatewayUrl(parsed.url ?? "");
+      setGatewayToken(parsed.token ?? "");
+      setGatewayPassword(parsed.password ?? "");
+      setGatewayDocReadMethod(parsed.readMethod ?? "workspace.read");
+      setGatewayDocWriteMethod(parsed.writeMethod ?? "workspace.write");
+    } catch {
+      // ignore malformed local settings
+    }
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      "agenticos.gateway.settings",
+      JSON.stringify({
+        url: gatewayUrl,
+        token: gatewayToken,
+        password: gatewayPassword,
+        readMethod: gatewayDocReadMethod,
+        writeMethod: gatewayDocWriteMethod,
+      })
+    );
+  }, [gatewayUrl, gatewayToken, gatewayPassword, gatewayDocReadMethod, gatewayDocWriteMethod]);
 
   useEffect(() => {
     if (!userId) return;
@@ -1992,6 +2057,184 @@ export function OpenclawDashboard() {
     return () => window.clearTimeout(clearTimer);
   }, [dashboardNotice]);
 
+  const gatewayApi = async <T,>(route: string, body: Record<string, unknown>): Promise<T> => {
+    const response = await fetch(route, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const json = (await response.json()) as { ok?: boolean; error?: string } & T;
+    if (!response.ok || json.ok === false) {
+      throw new Error(json.error || "Gateway request failed");
+    }
+    return json as T;
+  };
+
+  const syncGatewayBootstrap = async () => {
+    if (!gatewayUrl.trim()) {
+      setDashboardNotice({ type: "error", message: "Please enter a gateway WebSocket URL." });
+      return;
+    }
+    setGatewayLoading(true);
+    try {
+      const result = await gatewayApi<{ data: Record<string, unknown> }>("/api/openclaw/gateway/bootstrap", {
+        url: gatewayUrl.trim(),
+        token: gatewayToken.trim() || undefined,
+        password: gatewayPassword.trim() || undefined,
+      });
+
+      const data = result.data ?? {};
+      const statusPayload = (data.status ?? {}) as Record<string, unknown>;
+      const statusLabel =
+        typeof statusPayload.mode === "string"
+          ? `${statusPayload.mode} (${String(statusPayload.pairing ?? "pairing unknown")})`
+          : "Connected";
+
+      const nodePayload = (data.nodes ?? {}) as Record<string, unknown>;
+      const nodeItems = Array.isArray(nodePayload.items) ? nodePayload.items : [];
+      const mappedNodes: AgentProfile[] = nodeItems.map((item, idx) => {
+        const row = item as Record<string, unknown>;
+        const healthy = row.health !== "down" && row.state !== "down";
+        return {
+          name: String(row.id ?? row.name ?? `node-${idx + 1}`),
+          state: healthy ? "ready" : "down",
+          info: String(row.label ?? row.state ?? "Gateway node"),
+          logs: [],
+        };
+      });
+
+      const sessionsPayload = (data.sessions ?? {}) as Record<string, unknown>;
+      const sessionItems = Array.isArray(sessionsPayload.items) ? sessionsPayload.items : [];
+      const mappedSessions: GatewaySessionEntry[] = sessionItems.map((item) => {
+        const row = item as Record<string, unknown>;
+        return {
+          id: typeof row.id === "string" ? row.id : undefined,
+          key: typeof row.key === "string" ? row.key : undefined,
+          state: typeof row.state === "string" ? row.state : undefined,
+        };
+      });
+
+      setGatewayNodes(mappedNodes);
+      setGatewaySessions(mappedSessions);
+      setGatewayStatus(statusLabel);
+      setGatewayConnected(true);
+      await loadGatewayAgents();
+      setDashboardNotice({ type: "success", message: "Gateway connected and synced." });
+    } catch (error) {
+      setGatewayConnected(false);
+      setGatewayStatus(error instanceof Error ? error.message : "Gateway connection failed");
+      setDashboardNotice({ type: "error", message: error instanceof Error ? error.message : "Gateway connection failed" });
+    } finally {
+      setGatewayLoading(false);
+    }
+  };
+
+  const loadGatewayAgents = async () => {
+    if (!gatewayUrl.trim()) return;
+    try {
+      const result = await gatewayApi<{ agents: unknown[] }>("/api/openclaw/gateway/agents", {
+        url: gatewayUrl.trim(),
+        token: gatewayToken.trim() || undefined,
+        password: gatewayPassword.trim() || undefined,
+        action: "list",
+      });
+      setGatewayAgents(
+        (result.agents ?? []).map((entry) => {
+          const row = entry as Record<string, unknown>;
+          return {
+            id: typeof row.id === "string" ? row.id : undefined,
+            name: typeof row.name === "string" ? row.name : undefined,
+            workspace: typeof row.workspace === "string" ? row.workspace : undefined,
+            default: Boolean(row.default),
+          };
+        })
+      );
+    } catch (error) {
+      setDashboardNotice({ type: "error", message: error instanceof Error ? error.message : "Loading agents failed" });
+    }
+  };
+
+  const createGatewayAgent = async () => {
+    if (!gatewayUrl.trim()) {
+      setDashboardNotice({ type: "error", message: "Set gateway URL before creating agents." });
+      return;
+    }
+    if (!gatewayAgentId.trim() || !gatewayAgentName.trim()) {
+      setDashboardNotice({ type: "error", message: "Agent id and agent name are required." });
+      return;
+    }
+    try {
+      await gatewayApi<{ ok: boolean }>("/api/openclaw/gateway/agents", {
+        url: gatewayUrl.trim(),
+        token: gatewayToken.trim() || undefined,
+        password: gatewayPassword.trim() || undefined,
+        action: "create",
+        agent: {
+          id: gatewayAgentId.trim(),
+          name: gatewayAgentName.trim(),
+          workspace: gatewayAgentWorkspace.trim() || undefined,
+          default: false,
+        },
+      });
+      setGatewayAgentId("");
+      setGatewayAgentName("");
+      setGatewayAgentWorkspace("");
+      await loadGatewayAgents();
+      setDashboardNotice({ type: "success", message: "Gateway agent created." });
+    } catch (error) {
+      setDashboardNotice({ type: "error", message: error instanceof Error ? error.message : "Agent creation failed" });
+    }
+  };
+
+  const readGatewayDoc = async () => {
+    if (!gatewayUrl.trim() || !gatewayDocPath.trim()) {
+      setDashboardNotice({ type: "error", message: "Set gateway URL and document path first." });
+      return;
+    }
+    try {
+      const result = await gatewayApi<{ payload: unknown }>("/api/openclaw/gateway/docs", {
+        url: gatewayUrl.trim(),
+        token: gatewayToken.trim() || undefined,
+        password: gatewayPassword.trim() || undefined,
+        action: "read",
+        path: gatewayDocPath.trim(),
+        readMethod: gatewayDocReadMethod.trim() || "workspace.read",
+      });
+      const payload = result.payload as Record<string, unknown>;
+      const content =
+        typeof payload?.content === "string"
+          ? payload.content
+          : typeof payload?.text === "string"
+            ? payload.text
+            : JSON.stringify(result.payload, null, 2);
+      setGatewayDocContent(content);
+      setDashboardNotice({ type: "success", message: `Loaded ${gatewayDocPath.trim()}.` });
+    } catch (error) {
+      setDashboardNotice({ type: "error", message: error instanceof Error ? error.message : "Document read failed" });
+    }
+  };
+
+  const saveGatewayDoc = async () => {
+    if (!gatewayUrl.trim() || !gatewayDocPath.trim()) {
+      setDashboardNotice({ type: "error", message: "Set gateway URL and document path first." });
+      return;
+    }
+    try {
+      await gatewayApi<{ payload: unknown }>("/api/openclaw/gateway/docs", {
+        url: gatewayUrl.trim(),
+        token: gatewayToken.trim() || undefined,
+        password: gatewayPassword.trim() || undefined,
+        action: "write",
+        path: gatewayDocPath.trim(),
+        content: gatewayDocContent,
+        writeMethod: gatewayDocWriteMethod.trim() || "workspace.write",
+      });
+      setDashboardNotice({ type: "success", message: `Saved ${gatewayDocPath.trim()}.` });
+    } catch (error) {
+      setDashboardNotice({ type: "error", message: error instanceof Error ? error.message : "Document save failed" });
+    }
+  };
+
   const signIn = async () => {
     if (!email || !password) return;
     setAuthLoading(true);
@@ -2509,6 +2752,7 @@ export function OpenclawDashboard() {
               <TabsTrigger value="metrics">Statistics</TabsTrigger>
               <TabsTrigger value="logs">Agent Logs</TabsTrigger>
               <TabsTrigger value="calendar">Calendar</TabsTrigger>
+              <TabsTrigger value="gateway">Gateway</TabsTrigger>
             </TabsList>
 
             <Dialog open={issueDialogOpen} onOpenChange={setIssueDialogOpen}>
@@ -3327,6 +3571,137 @@ export function OpenclawDashboard() {
                 setView={setCalendarView}
                 events={calendarEvents}
               />
+            </TabsContent>
+
+            <TabsContent value="gateway" className="mt-0">
+              <div className="space-y-3">
+                <Card>
+                  <CardHeader>
+                    <CardTitle>OpenClaw Gateway</CardTitle>
+                    <CardDescription>
+                      Connect through backend WebSocket RPC. Pair this dashboard device on OpenClaw if prompted.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    <div className="grid gap-2 md:grid-cols-3">
+                      <Input
+                        value={gatewayUrl}
+                        onChange={(event) => setGatewayUrl(event.target.value)}
+                        placeholder="wss://your-gateway.example/ws"
+                      />
+                      <Input
+                        value={gatewayToken}
+                        onChange={(event) => setGatewayToken(event.target.value)}
+                        placeholder="Gateway token (preferred)"
+                      />
+                      <Input
+                        value={gatewayPassword}
+                        onChange={(event) => setGatewayPassword(event.target.value)}
+                        placeholder="Gateway password (optional)"
+                        type="password"
+                      />
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button onClick={() => void syncGatewayBootstrap()} disabled={gatewayLoading}>
+                        {gatewayLoading ? "Connecting..." : "Connect / Refresh"}
+                      </Button>
+                      <Badge variant={gatewayConnected ? "secondary" : "outline"}>{gatewayConnected ? "Connected" : "Disconnected"}</Badge>
+                      <span className="text-xs text-muted-foreground">{gatewayStatus}</span>
+                    </div>
+                  </CardContent>
+                </Card>
+
+                <div className="grid gap-3 lg:grid-cols-2">
+                  <Card>
+                    <CardHeader>
+                      <CardTitle>Agents</CardTitle>
+                      <CardDescription>Loaded from gateway config (`config.get`).</CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-2">
+                      <div className="grid gap-2 md:grid-cols-3">
+                        <Input value={gatewayAgentId} onChange={(event) => setGatewayAgentId(event.target.value)} placeholder="Agent id" />
+                        <Input value={gatewayAgentName} onChange={(event) => setGatewayAgentName(event.target.value)} placeholder="Agent name" />
+                        <Input
+                          value={gatewayAgentWorkspace}
+                          onChange={(event) => setGatewayAgentWorkspace(event.target.value)}
+                          placeholder="Workspace path (optional)"
+                        />
+                      </div>
+                      <div className="flex gap-2">
+                        <Button variant="outline" onClick={() => void loadGatewayAgents()}>
+                          Reload Agents
+                        </Button>
+                        <Button onClick={() => void createGatewayAgent()}>Create Agent</Button>
+                      </div>
+                      <div className="space-y-1 text-sm">
+                        {gatewayAgents.length === 0 && <p className="text-muted-foreground">No agents loaded yet.</p>}
+                        {gatewayAgents.map((agent) => (
+                          <div key={`${agent.id}-${agent.name}`} className="rounded-md border p-2">
+                            <p className="font-medium">{agent.name || agent.id || "Unnamed agent"}</p>
+                            <p className="text-xs text-muted-foreground">
+                              {agent.id || "no-id"} {agent.workspace ? `• ${agent.workspace}` : ""}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  <Card>
+                    <CardHeader>
+                      <CardTitle>Sessions</CardTitle>
+                      <CardDescription>Live session list from `sessions.list`.</CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-1 text-sm">
+                      {gatewaySessions.length === 0 && <p className="text-muted-foreground">No sessions loaded yet.</p>}
+                      {gatewaySessions.map((session, idx) => (
+                        <div key={`${session.id || session.key || idx}`} className="rounded-md border p-2">
+                          <p className="font-medium">{session.key || session.id || "Session"}</p>
+                          <p className="text-xs text-muted-foreground">{session.state || "unknown state"}</p>
+                        </div>
+                      ))}
+                      <Separator />
+                      <p className="text-xs text-muted-foreground">Connected nodes: {gatewayNodes.length}</p>
+                    </CardContent>
+                  </Card>
+                </div>
+
+                <Card>
+                  <CardHeader>
+                    <CardTitle>SOUL.md / MEMORY.md Editor</CardTitle>
+                    <CardDescription>
+                      Uses gateway RPC methods (defaults: `workspace.read` / `workspace.write`). Change method names if your gateway uses different ones.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-2">
+                    <div className="grid gap-2 md:grid-cols-3">
+                      <Input value={gatewayDocPath} onChange={(event) => setGatewayDocPath(event.target.value)} placeholder="SOUL.md or MEMORY.md" />
+                      <Input
+                        value={gatewayDocReadMethod}
+                        onChange={(event) => setGatewayDocReadMethod(event.target.value)}
+                        placeholder="Read method"
+                      />
+                      <Input
+                        value={gatewayDocWriteMethod}
+                        onChange={(event) => setGatewayDocWriteMethod(event.target.value)}
+                        placeholder="Write method"
+                      />
+                    </div>
+                    <div className="flex gap-2">
+                      <Button variant="outline" onClick={() => void readGatewayDoc()}>
+                        Read Document
+                      </Button>
+                      <Button onClick={() => void saveGatewayDoc()}>Save Document</Button>
+                    </div>
+                    <Textarea
+                      value={gatewayDocContent}
+                      onChange={(event) => setGatewayDocContent(event.target.value)}
+                      className="min-h-[220px] font-mono text-xs"
+                      placeholder="Document content..."
+                    />
+                  </CardContent>
+                </Card>
+              </div>
             </TabsContent>
           </Tabs>
 

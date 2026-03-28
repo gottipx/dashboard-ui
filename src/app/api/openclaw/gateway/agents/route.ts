@@ -43,24 +43,62 @@ export async function POST(request: Request) {
         const cfg = parseAgents(cfgPayload);
         return NextResponse.json({ ok: true, agents: cfg.list, source: "config.get" });
       } catch {
-        // fallback for deployments that block config methods
-        const nodesPayload = await openclawRpc({ url: body.url, auth, method: "node.list", params: {}, timeoutMs: 10000 });
-        const payload = (nodesPayload ?? {}) as Record<string, unknown>;
-        const items = Array.isArray(payload.items) ? payload.items : [];
-        const agents = items.map((entry, idx) => {
-          const row = entry as Record<string, unknown>;
-          return {
-            id: typeof row.id === "string" ? row.id : `node-${idx + 1}`,
-            name: typeof row.name === "string" ? row.name : typeof row.label === "string" ? row.label : "Gateway Node",
-            workspace: typeof row.workspace === "string" ? row.workspace : undefined,
-          };
-        });
-        return NextResponse.json({
-          ok: true,
-          agents,
-          source: "node.list",
-          warning: "config.get unavailable; showing nodes as agents.",
-        });
+        try {
+          // fallback for deployments that block config methods
+          const nodesPayload = await openclawRpc({ url: body.url, auth, method: "node.list", params: {}, timeoutMs: 10000 });
+          const payload = (nodesPayload ?? {}) as Record<string, unknown>;
+          const items = Array.isArray(payload.items) ? payload.items : [];
+          const agents = items.map((entry, idx) => {
+            const row = entry as Record<string, unknown>;
+            return {
+              id: typeof row.id === "string" ? row.id : `node-${idx + 1}`,
+              name: typeof row.name === "string" ? row.name : typeof row.label === "string" ? row.label : "Gateway Node",
+              workspace: typeof row.workspace === "string" ? row.workspace : undefined,
+            };
+          });
+          return NextResponse.json({
+            ok: true,
+            agents,
+            source: "node.list",
+            warning: "config.get unavailable; showing nodes as agents.",
+          });
+        } catch {
+          // final fallback using presence
+          const presencePayload = await openclawRpc({
+            url: body.url,
+            auth,
+            method: "system-presence",
+            params: {},
+            timeoutMs: 10000,
+          });
+          const payload = (presencePayload ?? {}) as Record<string, unknown>;
+          const items = Array.isArray(payload.items) ? payload.items : [];
+          const agents = items
+            .map((entry, idx) => {
+              const row = entry as Record<string, unknown>;
+              const roles = Array.isArray(row.roles) ? row.roles.map(String) : [];
+              if (roles.length > 0 && !roles.includes("node")) return null;
+              return {
+                id: typeof row.deviceId === "string" ? row.deviceId : `presence-${idx + 1}`,
+                name:
+                  typeof row.name === "string"
+                    ? row.name
+                    : typeof row.label === "string"
+                      ? row.label
+                      : typeof row.deviceId === "string"
+                        ? row.deviceId
+                        : "Gateway Presence",
+                workspace: undefined,
+              };
+            })
+            .filter(Boolean);
+          return NextResponse.json({
+            ok: true,
+            agents,
+            source: "system-presence",
+            warning: "config.get/node.list unavailable; showing presence entries.",
+          });
+        }
       }
     }
 

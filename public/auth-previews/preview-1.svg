@@ -1,0 +1,73 @@
+<svg width="1794" height="940" viewBox="0 0 1794 940" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1794" height="940" rx="24" fill="#040B1A"/>
+  <rect x="12" y="12" width="1770" height="916" rx="20" fill="#050B17" stroke="#1F2937"/>
+
+  <rect x="36" y="44" width="300" height="852" rx="18" fill="#0B0F17" stroke="#2F3A4E"/>
+  <rect x="52" y="64" width="44" height="44" rx="12" fill="#111827"/>
+  <path d="M74 86 L68 80 M74 86 L80 80" stroke="#E5E7EB" stroke-width="2"/>
+  <rect x="276" y="64" width="44" height="44" rx="12" fill="#111827"/>
+  <path d="M286 74 L310 98 M310 74 L286 98" stroke="#E5E7EB" stroke-width="2"/>
+
+  <rect x="52" y="122" width="260" height="52" rx="14" fill="#111827"/>
+  <circle cx="74" cy="148" r="7" fill="#6B7280"/>
+  <text x="98" y="155" fill="#E5E7EB" font-size="36" font-family="Arial" transform="scale(0.35)">OpenClaw</text>
+
+  <g fill="#9CA3AF" font-family="Arial" font-size="18">
+    <text x="76" y="238">Overview</text>
+    <text x="76" y="286">Kanban</text>
+    <text x="76" y="334">Tasks</text>
+    <text x="76" y="382">Projects</text>
+    <text x="76" y="430">Issues</text>
+    <text x="76" y="478">Statistics</text>
+    <text x="76" y="526">Agent Logs</text>
+    <text x="76" y="574">Calendar</text>
+  </g>
+  <rect x="48" y="198" width="264" height="48" rx="12" fill="#2A2F3A"/>
+  <circle cx="66" cy="222" r="4" fill="#22D3EE"/>
+
+  <rect x="328" y="44" width="1430" height="106" rx="18" fill="#0B0F17" stroke="#2F3A4E"/>
+  <text x="352" y="86" fill="#F3F4F6" font-size="24" font-family="Arial" font-weight="700">OpenClaw Dashboard UI</text>
+  <text x="352" y="118" fill="#9CA3AF" font-size="14" font-family="Arial">Interactive prototype with persisted state and advanced planning views</text>
+
+  <rect x="1392" y="76" width="268" height="42" rx="14" fill="#111827" stroke="#374151"/>
+  <text x="1410" y="102" fill="#9CA3AF" font-size="12" font-family="Arial">Search tasks, issues, sessions...</text>
+  <circle cx="1678" cy="97" r="6" fill="#FACC15"/>
+  <circle cx="1720" cy="97" r="23" fill="#111827" stroke="#374151"/>
+  <text x="1711" y="102" fill="#9CA3AF" font-size="18" font-family="Arial">AL</text>
+
+  <rect x="328" y="170" width="344" height="158" rx="18" fill="#0B0F17" stroke="#1D4ED8"/>
+  <rect x="680" y="170" width="344" height="158" rx="18" fill="#0B0F17" stroke="#1D4ED8"/>
+  <rect x="1032" y="170" width="344" height="158" rx="18" fill="#0B0F17" stroke="#1D4ED8"/>
+  <rect x="1384" y="170" width="374" height="158" rx="18" fill="#0B0F17" stroke="#1D4ED8"/>
+
+  <rect x="328" y="350" width="1430" height="52" rx="16" fill="#0B0F17"/>
+  <g fill="#9CA3AF" font-size="18" font-family="Arial">
+    <text x="344" y="384">Overview</text><text x="450" y="384">Kanban</text><text x="540" y="384">Tasks</text>
+    <text x="615" y="384">Projects</text><text x="710" y="384">Issues</text><text x="790" y="384">Statistics</text>
+    <text x="895" y="384">Agent Logs</text><text x="1012" y="384">Calendar</text>
+  </g>
+
+  <rect x="328" y="412" width="748" height="430" rx="20" fill="#0B0F17" stroke="#2F3A4E"/>
+  <rect x="1090" y="412" width="668" height="430" rx="20" fill="#0B0F17" stroke="#2F3A4E"/>
+  <text x="348" y="450" fill="#F3F4F6" font-size="24" font-family="Arial">Agents</text>
+  <text x="348" y="484" fill="#9CA3AF" font-size="16" font-family="Arial">Click an agent to inspect logs and current runtime status</text>
+
+  <g>
+    <rect x="348" y="518" width="708" height="52" rx="14" fill="#2A2F3A" stroke="#6B7280"/>
+    <circle cx="370" cy="544" r="7" fill="#22C55E"/>
+    <rect x="348" y="582" width="708" height="52" rx="14" fill="#111827" stroke="#2F3A4E"/>
+    <circle cx="370" cy="608" r="7" fill="#FBBF24"/>
+    <rect x="348" y="646" width="708" height="52" rx="14" fill="#111827" stroke="#2F3A4E"/>
+    <circle cx="370" cy="672" r="7" fill="#FBBF24"/>
+    <rect x="348" y="710" width="708" height="52" rx="14" fill="#111827" stroke="#2F3A4E"/>
+    <circle cx="370" cy="736" r="7" fill="#F43F5E"/>
+    <rect x="348" y="774" width="708" height="52" rx="14" fill="#111827" stroke="#2F3A4E"/>
+    <circle cx="370" cy="800" r="7" fill="#22C55E"/>
+  </g>
+
+  <text x="1114" y="450" fill="#F3F4F6" font-size="24" font-family="Arial">resolver-agent</text>
+  <text x="1114" y="482" fill="#9CA3AF" font-size="16" font-family="Arial">Latest runtime logs for selected agent</text>
+  <rect x="1116" y="520" width="634" height="304" rx="14" fill="#020617" stroke="#2F3A4E"/>
+
+  <rect x="328" y="862" width="1430" height="46" rx="14" fill="#0B0F17" stroke="#2F3A4E"/>
+</svg>

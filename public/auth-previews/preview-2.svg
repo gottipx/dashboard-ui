@@ -1,0 +1,45 @@
+<svg width="1600" height="900" viewBox="0 0 1600 900" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg2" x1="0" y1="0" x2="1600" y2="900" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0B1220"/>
+      <stop offset="1" stop-color="#030712"/>
+    </linearGradient>
+  </defs>
+  <rect width="1600" height="900" rx="24" fill="url(#bg2)"/>
+  <rect x="30" y="30" width="1540" height="90" rx="18" fill="#0A1020" stroke="#1E293B"/>
+  <rect x="65" y="58" width="360" height="34" rx="10" fill="#111827"/>
+  <rect x="1140" y="58" width="220" height="34" rx="17" fill="#111827" stroke="#334155"/>
+
+  <rect x="30" y="140" width="110" height="730" rx="18" fill="#0A1020" stroke="#1E293B"/>
+  <g fill="#1F2937">
+    <circle cx="85" cy="200" r="13"/><circle cx="85" cy="255" r="13"/><circle cx="85" cy="310" r="13"/>
+    <circle cx="85" cy="365" r="13"/><circle cx="85" cy="420" r="13"/><circle cx="85" cy="475" r="13"/>
+  </g>
+
+  <rect x="160" y="140" width="1410" height="150" rx="20" fill="#0F172A" stroke="#1D4ED8"/>
+  <rect x="185" y="168" width="320" height="96" rx="14" fill="#0B1220" stroke="#1F2937"/>
+  <rect x="525" y="168" width="320" height="96" rx="14" fill="#0B1220" stroke="#1F2937"/>
+  <rect x="865" y="168" width="320" height="96" rx="14" fill="#0B1220" stroke="#1F2937"/>
+  <rect x="1205" y="168" width="340" height="96" rx="14" fill="#0B1220" stroke="#1F2937"/>
+
+  <rect x="160" y="312" width="860" height="558" rx="20" fill="#0F172A" stroke="#1F2937"/>
+  <rect x="1040" y="312" width="530" height="558" rx="20" fill="#0F172A" stroke="#1F2937"/>
+
+  <rect x="185" y="360" width="810" height="64" rx="12" fill="#111827" stroke="#334155"/>
+  <circle cx="210" cy="392" r="7" fill="#22C55E"/>
+  <rect x="185" y="438" width="810" height="64" rx="12" fill="#0B1220" stroke="#1F2937"/>
+  <circle cx="210" cy="470" r="7" fill="#F59E0B"/>
+  <rect x="185" y="516" width="810" height="64" rx="12" fill="#0B1220" stroke="#1F2937"/>
+  <circle cx="210" cy="548" r="7" fill="#F43F5E"/>
+
+  <rect x="1065" y="380" width="480" height="210" rx="14" fill="#020617" stroke="#334155"/>
+  <polyline points="1090,540 1160,500 1220,520 1300,450 1390,470 1470,430 1525,445" fill="none" stroke="#38BDF8" stroke-width="4"/>
+  <rect x="1065" y="612" width="480" height="230" rx="14" fill="#020617" stroke="#334155"/>
+  <g>
+    <rect x="1100" y="760" width="36" height="55" rx="6" fill="#0EA5E9"/>
+    <rect x="1160" y="725" width="36" height="90" rx="6" fill="#22C55E"/>
+    <rect x="1220" y="690" width="36" height="125" rx="6" fill="#8B5CF6"/>
+    <rect x="1280" y="745" width="36" height="70" rx="6" fill="#06B6D4"/>
+    <rect x="1340" y="670" width="36" height="145" rx="6" fill="#3B82F6"/>
+  </g>
+</svg>

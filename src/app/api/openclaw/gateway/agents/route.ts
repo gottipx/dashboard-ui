@@ -36,14 +36,37 @@ export async function POST(request: Request) {
     }
 
     const auth = { token: body.token, password: body.password };
-    const cfgPayload = await openclawRpc({ url: body.url, auth, method: "config.get", params: {} });
-    const cfg = parseAgents(cfgPayload);
 
     if (body.action === "list" || !body.action) {
-      return NextResponse.json({ ok: true, agents: cfg.list });
+      try {
+        const cfgPayload = await openclawRpc({ url: body.url, auth, method: "config.get", params: {}, timeoutMs: 10000 });
+        const cfg = parseAgents(cfgPayload);
+        return NextResponse.json({ ok: true, agents: cfg.list, source: "config.get" });
+      } catch {
+        // fallback for deployments that block config methods
+        const nodesPayload = await openclawRpc({ url: body.url, auth, method: "node.list", params: {}, timeoutMs: 10000 });
+        const payload = (nodesPayload ?? {}) as Record<string, unknown>;
+        const items = Array.isArray(payload.items) ? payload.items : [];
+        const agents = items.map((entry, idx) => {
+          const row = entry as Record<string, unknown>;
+          return {
+            id: typeof row.id === "string" ? row.id : `node-${idx + 1}`,
+            name: typeof row.name === "string" ? row.name : typeof row.label === "string" ? row.label : "Gateway Node",
+            workspace: typeof row.workspace === "string" ? row.workspace : undefined,
+          };
+        });
+        return NextResponse.json({
+          ok: true,
+          agents,
+          source: "node.list",
+          warning: "config.get unavailable; showing nodes as agents.",
+        });
+      }
     }
 
     if (body.action === "create") {
+      const cfgPayload = await openclawRpc({ url: body.url, auth, method: "config.get", params: {}, timeoutMs: 10000 });
+      const cfg = parseAgents(cfgPayload);
       const id = body.agent?.id?.trim();
       const name = body.agent?.name?.trim();
       const workspace = body.agent?.workspace?.trim();

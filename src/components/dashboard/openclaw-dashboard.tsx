@@ -941,14 +941,10 @@ export function OpenclawDashboard() {
     try {
       const parsed = JSON.parse(raw) as {
         url?: string;
-        token?: string;
-        password?: string;
         readMethod?: string;
         writeMethod?: string;
       };
       setGatewayUrl(parsed.url ?? "");
-      setGatewayToken(parsed.token ?? "");
-      setGatewayPassword(parsed.password ?? "");
       setGatewayDocReadMethod(parsed.readMethod ?? "workspace.read");
       setGatewayDocWriteMethod(parsed.writeMethod ?? "workspace.write");
     } catch {
@@ -961,13 +957,11 @@ export function OpenclawDashboard() {
       "agenticos.gateway.settings",
       JSON.stringify({
         url: gatewayUrl,
-        token: gatewayToken,
-        password: gatewayPassword,
         readMethod: gatewayDocReadMethod,
         writeMethod: gatewayDocWriteMethod,
       })
     );
-  }, [gatewayUrl, gatewayToken, gatewayPassword, gatewayDocReadMethod, gatewayDocWriteMethod]);
+  }, [gatewayUrl, gatewayDocReadMethod, gatewayDocWriteMethod]);
 
   useEffect(() => {
     if (!userId) return;
@@ -3593,6 +3587,7 @@ export function OpenclawDashboard() {
                         value={gatewayToken}
                         onChange={(event) => setGatewayToken(event.target.value)}
                         placeholder="Gateway token (preferred)"
+                        type="password"
                       />
                       <Input
                         value={gatewayPassword}

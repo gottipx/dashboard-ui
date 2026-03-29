@@ -42,103 +42,115 @@ export async function POST(request: Request) {
       try {
         const cfgPayload = await callGateway({ url: body.url, auth, method: "config.get", params: {}, timeoutMs: 10000 });
         const cfg = parseAgents(cfgPayload);
-        return NextResponse.json({ ok: true, agents: cfg.list, source: "config.get" });
+        if (cfg.list.length > 0) {
+          return NextResponse.json({ ok: true, agents: cfg.list, source: "config.get" });
+        }
       } catch {
-        try {
-          // fallback for deployments that block config methods
-          const nodesPayload = await callGateway({ url: body.url, auth, method: "node.list", params: {}, timeoutMs: 10000 });
-          const payload = (nodesPayload ?? {}) as Record<string, unknown>;
-          const items = Array.isArray(payload.items) ? payload.items : [];
-          const agents = items.map((entry, idx) => {
-            const row = entry as Record<string, unknown>;
-            return {
-              id: typeof row.id === "string" ? row.id : `node-${idx + 1}`,
-              name: typeof row.name === "string" ? row.name : typeof row.label === "string" ? row.label : "Gateway Node",
-              workspace: typeof row.workspace === "string" ? row.workspace : undefined,
-            };
-          });
+        // continue with fallbacks below
+      }
+
+      try {
+        // fallback for deployments that block config methods or return empty agents list
+        const nodesPayload = await callGateway({ url: body.url, auth, method: "node.list", params: {}, timeoutMs: 10000 });
+        const payload = (nodesPayload ?? {}) as Record<string, unknown>;
+        const items = Array.isArray(payload.items) ? payload.items : [];
+        const agents = items.map((entry, idx) => {
+          const row = entry as Record<string, unknown>;
+          return {
+            id: typeof row.id === "string" ? row.id : `node-${idx + 1}`,
+            name: typeof row.name === "string" ? row.name : typeof row.label === "string" ? row.label : "Gateway Node",
+            workspace: typeof row.workspace === "string" ? row.workspace : undefined,
+          };
+        });
+        if (agents.length > 0) {
           return NextResponse.json({
             ok: true,
             agents,
             source: "node.list",
-            warning: "config.get unavailable; showing nodes as agents.",
+            warning: "config.get had no agents; using node.list.",
           });
-        } catch {
-          try {
-            const cliNodesPayload = await runOpenclawCliJson(["nodes", "status", "--json"], 12000);
-            const payload = (cliNodesPayload ?? {}) as Record<string, unknown>;
-            const items = Array.isArray(payload.items)
-              ? payload.items
-              : Array.isArray(payload.nodes)
-                ? payload.nodes
-                : Array.isArray(cliNodesPayload)
-                  ? (cliNodesPayload as unknown[])
-                  : [];
-            const agents = items.map((entry, idx) => {
-              const row = entry as Record<string, unknown>;
-              return {
-                id:
-                  typeof row.id === "string"
+        }
+      } catch {
+        // continue with fallbacks below
+      }
+
+      try {
+        const cliNodesPayload = await runOpenclawCliJson(["nodes", "status", "--json"], 12000);
+        const payload = (cliNodesPayload ?? {}) as Record<string, unknown>;
+        const items = Array.isArray(payload.items)
+          ? payload.items
+          : Array.isArray(payload.nodes)
+            ? payload.nodes
+            : Array.isArray(cliNodesPayload)
+              ? (cliNodesPayload as unknown[])
+              : [];
+        const agents = items.map((entry, idx) => {
+          const row = entry as Record<string, unknown>;
+          return {
+            id:
+              typeof row.id === "string"
+                ? row.id
+                : typeof row.nodeId === "string"
+                  ? row.nodeId
+                  : `node-${idx + 1}`,
+            name:
+              typeof row.name === "string"
+                ? row.name
+                : typeof row.label === "string"
+                  ? row.label
+                  : typeof row.id === "string"
                     ? row.id
-                    : typeof row.nodeId === "string"
-                      ? row.nodeId
-                      : `node-${idx + 1}`,
-                name:
-                  typeof row.name === "string"
-                    ? row.name
-                    : typeof row.label === "string"
-                      ? row.label
-                      : typeof row.id === "string"
-                        ? row.id
-                        : "Gateway Node",
-                workspace: typeof row.workspace === "string" ? row.workspace : undefined,
-              };
-            });
-            return NextResponse.json({
-              ok: true,
-              agents,
-              source: "nodes.status",
-              warning: "config.get/node.list unavailable; using nodes status.",
-            });
-          } catch {
-          // final fallback using presence
-          const presencePayload = await callGateway({
-            url: body.url,
-            auth,
-            method: "system-presence",
-            params: {},
-            timeoutMs: 10000,
-          });
-          const payload = (presencePayload ?? {}) as Record<string, unknown>;
-          const items = Array.isArray(payload.items) ? payload.items : [];
-          const agents = items
-            .map((entry, idx) => {
-              const row = entry as Record<string, unknown>;
-              const roles = Array.isArray(row.roles) ? row.roles.map(String) : [];
-              if (roles.length > 0 && !roles.includes("node")) return null;
-              return {
-                id: typeof row.deviceId === "string" ? row.deviceId : `presence-${idx + 1}`,
-                name:
-                  typeof row.name === "string"
-                    ? row.name
-                    : typeof row.label === "string"
-                      ? row.label
-                      : typeof row.deviceId === "string"
-                        ? row.deviceId
-                        : "Gateway Presence",
-                workspace: undefined,
-              };
-            })
-            .filter(Boolean);
+                    : "Gateway Node",
+            workspace: typeof row.workspace === "string" ? row.workspace : undefined,
+          };
+        });
+        if (agents.length > 0) {
           return NextResponse.json({
             ok: true,
             agents,
-            source: "system-presence",
-            warning: "config.get/node.list unavailable; showing presence entries.",
+            source: "nodes.status",
+            warning: "config.get/node.list had no agents; using nodes status.",
           });
-          }
         }
+      } catch {
+        // continue with presence fallback below
       }
+
+      // final fallback using presence
+      const presencePayload = await callGateway({
+        url: body.url,
+        auth,
+        method: "system-presence",
+        params: {},
+        timeoutMs: 10000,
+      });
+      const payload = (presencePayload ?? {}) as Record<string, unknown>;
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      const agents = items
+        .map((entry, idx) => {
+          const row = entry as Record<string, unknown>;
+          const roles = Array.isArray(row.roles) ? row.roles.map(String) : [];
+          if (roles.length > 0 && !roles.includes("node")) return null;
+          return {
+            id: typeof row.deviceId === "string" ? row.deviceId : `presence-${idx + 1}`,
+            name:
+              typeof row.name === "string"
+                ? row.name
+                : typeof row.label === "string"
+                  ? row.label
+                  : typeof row.deviceId === "string"
+                    ? row.deviceId
+                    : "Gateway Presence",
+            workspace: undefined,
+          };
+        })
+        .filter(Boolean);
+      return NextResponse.json({
+        ok: true,
+        agents,
+        source: "system-presence",
+        warning: "config.get/node.list/nodes.status had no agents; showing presence entries.",
+      });
     }
 
     if (body.action === "create") {

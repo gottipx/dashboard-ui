@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { openclawRpc } from "@/lib/openclaw/gateway-rpc";
+import { callGateway } from "@/lib/openclaw/gateway-call";
 
 export const runtime = "nodejs";
 
@@ -27,7 +27,7 @@ export async function POST(request: Request) {
     const writeMethod = body.writeMethod || "workspace.write";
 
     if (body.action === "read") {
-      const payload = await openclawRpc({
+      const payload = await callGateway({
         url: body.url,
         auth,
         method: readMethod,
@@ -36,7 +36,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: true, payload });
     }
 
-    const payload = await openclawRpc({
+    const payload = await callGateway({
       url: body.url,
       auth,
       method: writeMethod,

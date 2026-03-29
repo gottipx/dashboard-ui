@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { openclawRpc } from "@/lib/openclaw/gateway-rpc";
+import { callGateway } from "@/lib/openclaw/gateway-call";
 
 export const runtime = "nodejs";
 
@@ -20,7 +20,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Missing url or method." }, { status: 400 });
     }
 
-    const payload = await openclawRpc({
+    const payload = await callGateway({
       url: body.url,
       auth: { token: body.token, password: body.password },
       method: body.method,

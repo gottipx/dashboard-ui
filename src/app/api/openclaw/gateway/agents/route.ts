@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { openclawRpc } from "@/lib/openclaw/gateway-rpc";
+import { callGateway } from "@/lib/openclaw/gateway-call";
 
 export const runtime = "nodejs";
 
@@ -39,13 +39,13 @@ export async function POST(request: Request) {
 
     if (body.action === "list" || !body.action) {
       try {
-        const cfgPayload = await openclawRpc({ url: body.url, auth, method: "config.get", params: {}, timeoutMs: 10000 });
+        const cfgPayload = await callGateway({ url: body.url, auth, method: "config.get", params: {}, timeoutMs: 10000 });
         const cfg = parseAgents(cfgPayload);
         return NextResponse.json({ ok: true, agents: cfg.list, source: "config.get" });
       } catch {
         try {
           // fallback for deployments that block config methods
-          const nodesPayload = await openclawRpc({ url: body.url, auth, method: "node.list", params: {}, timeoutMs: 10000 });
+          const nodesPayload = await callGateway({ url: body.url, auth, method: "node.list", params: {}, timeoutMs: 10000 });
           const payload = (nodesPayload ?? {}) as Record<string, unknown>;
           const items = Array.isArray(payload.items) ? payload.items : [];
           const agents = items.map((entry, idx) => {
@@ -64,7 +64,7 @@ export async function POST(request: Request) {
           });
         } catch {
           // final fallback using presence
-          const presencePayload = await openclawRpc({
+          const presencePayload = await callGateway({
             url: body.url,
             auth,
             method: "system-presence",
@@ -103,7 +103,7 @@ export async function POST(request: Request) {
     }
 
     if (body.action === "create") {
-      const cfgPayload = await openclawRpc({ url: body.url, auth, method: "config.get", params: {}, timeoutMs: 10000 });
+      const cfgPayload = await callGateway({ url: body.url, auth, method: "config.get", params: {}, timeoutMs: 10000 });
       const cfg = parseAgents(cfgPayload);
       const id = body.agent?.id?.trim();
       const name = body.agent?.name?.trim();
@@ -132,7 +132,7 @@ export async function POST(request: Request) {
       };
       if (cfg.hash) patchPayload.baseHash = cfg.hash;
 
-      const patchResult = await openclawRpc({
+      const patchResult = await callGateway({
         url: body.url,
         auth,
         method: "config.patch",

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { callGateway } from "@/lib/openclaw/gateway-call";
+import { runOpenclawCliJson } from "@/lib/openclaw/cli";
 
 export const runtime = "nodejs";
 
@@ -30,13 +31,25 @@ export async function POST(request: Request) {
     const unwrap = (result: PromiseSettledResult<unknown>) =>
       result.status === "fulfilled" ? result.value : { error: result.reason instanceof Error ? result.reason.message : String(result.reason) };
 
+    let nodesValue = unwrap(nodes);
+    const nodesObj = nodesValue as Record<string, unknown>;
+    const nodesHasError = typeof nodesObj?.error === "string";
+    if (nodesHasError) {
+      try {
+        const cliNodes = await runOpenclawCliJson(["nodes", "status", "--json"], 12000);
+        nodesValue = cliNodes;
+      } catch {
+        // keep gateway error payload
+      }
+    }
+
     return NextResponse.json({
       ok: true,
       data: {
         status: unwrap(status),
         health: unwrap(health),
         presence: unwrap(presence),
-        nodes: unwrap(nodes),
+        nodes: nodesValue,
         sessions: unwrap(sessions),
       },
     });

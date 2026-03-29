@@ -1770,11 +1770,15 @@ export function OpenclawDashboard() {
     const completionRate = totalCards ? Math.round((doneCards / totalCards) * 100) : 0;
     return [
       { label: "Agents", value: `${agents.length}`, detail: "Registered agents" },
-      { label: "Open Sessions", value: "31", detail: "Mock live sessions" },
+      {
+        label: "Open Sessions",
+        value: `${gatewayConnected ? gatewaySessions.length : 31}`,
+        detail: gatewayConnected ? "Gateway live sessions" : "Mock live sessions",
+      },
       { label: "Board Cards", value: `${totalCards}`, detail: `${completionRate}% done` },
       { label: "Issues", value: `${issues.length}`, detail: "Synced into board flow" },
     ];
-  }, [issues.length, kanbanColumns, agents.length]);
+  }, [issues.length, kanbanColumns, agents.length, gatewayConnected, gatewaySessions.length]);
 
   const laneSegments = useMemo<PieSegment[]>(
     () =>
@@ -2085,20 +2089,34 @@ export function OpenclawDashboard() {
           : "Connected";
 
       const nodePayload = (data.nodes ?? {}) as Record<string, unknown>;
-      const nodeItems = Array.isArray(nodePayload.items) ? nodePayload.items : [];
+      const nodeItems = Array.isArray(nodePayload.items)
+        ? nodePayload.items
+        : Array.isArray(nodePayload.nodes)
+          ? nodePayload.nodes
+          : Array.isArray(data.nodes)
+            ? (data.nodes as unknown[])
+            : [];
       const mappedNodes: AgentProfile[] = nodeItems.map((item, idx) => {
         const row = item as Record<string, unknown>;
-        const healthy = row.health !== "down" && row.state !== "down";
+        const stateRaw = String(row.state ?? row.health ?? "").toLowerCase();
+        const healthy = stateRaw && stateRaw !== "down" && stateRaw !== "error";
+        const running = stateRaw.includes("run") || stateRaw.includes("busy");
         return {
-          name: String(row.id ?? row.name ?? `node-${idx + 1}`),
-          state: healthy ? "ready" : "down",
-          info: String(row.label ?? row.state ?? "Gateway node"),
+          name: String(row.id ?? row.name ?? row.nodeId ?? `node-${idx + 1}`),
+          state: !healthy ? "down" : running ? "running" : "ready",
+          info: String(row.label ?? row.state ?? row.health ?? "Gateway node"),
           logs: [],
         };
       });
 
       const sessionsPayload = (data.sessions ?? {}) as Record<string, unknown>;
-      const sessionItems = Array.isArray(sessionsPayload.items) ? sessionsPayload.items : [];
+      const sessionItems = Array.isArray(sessionsPayload.items)
+        ? sessionsPayload.items
+        : Array.isArray(sessionsPayload.sessions)
+          ? sessionsPayload.sessions
+          : Array.isArray(data.sessions)
+            ? (data.sessions as unknown[])
+            : [];
       const mappedSessions: GatewaySessionEntry[] = sessionItems.map((item) => {
         const row = item as Record<string, unknown>;
         return {
@@ -2110,6 +2128,10 @@ export function OpenclawDashboard() {
 
       setGatewayNodes(mappedNodes);
       setGatewaySessions(mappedSessions);
+      if (mappedNodes.length > 0) {
+        setAgents(mappedNodes);
+        setSelectedAgentName(mappedNodes[0].name);
+      }
       setGatewayStatus(statusLabel);
       setGatewayConnected(true);
       await loadGatewayAgents();

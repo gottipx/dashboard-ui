@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { callGateway } from "@/lib/openclaw/gateway-call";
+import { runOpenclawCliJson } from "@/lib/openclaw/cli";
 
 export const runtime = "nodejs";
 
@@ -63,6 +64,43 @@ export async function POST(request: Request) {
             warning: "config.get unavailable; showing nodes as agents.",
           });
         } catch {
+          try {
+            const cliNodesPayload = await runOpenclawCliJson(["nodes", "status", "--json"], 12000);
+            const payload = (cliNodesPayload ?? {}) as Record<string, unknown>;
+            const items = Array.isArray(payload.items)
+              ? payload.items
+              : Array.isArray(payload.nodes)
+                ? payload.nodes
+                : Array.isArray(cliNodesPayload)
+                  ? (cliNodesPayload as unknown[])
+                  : [];
+            const agents = items.map((entry, idx) => {
+              const row = entry as Record<string, unknown>;
+              return {
+                id:
+                  typeof row.id === "string"
+                    ? row.id
+                    : typeof row.nodeId === "string"
+                      ? row.nodeId
+                      : `node-${idx + 1}`,
+                name:
+                  typeof row.name === "string"
+                    ? row.name
+                    : typeof row.label === "string"
+                      ? row.label
+                      : typeof row.id === "string"
+                        ? row.id
+                        : "Gateway Node",
+                workspace: typeof row.workspace === "string" ? row.workspace : undefined,
+              };
+            });
+            return NextResponse.json({
+              ok: true,
+              agents,
+              source: "nodes.status",
+              warning: "config.get/node.list unavailable; using nodes status.",
+            });
+          } catch {
           // final fallback using presence
           const presencePayload = await callGateway({
             url: body.url,
@@ -98,6 +136,7 @@ export async function POST(request: Request) {
             source: "system-presence",
             warning: "config.get/node.list unavailable; showing presence entries.",
           });
+          }
         }
       }
     }

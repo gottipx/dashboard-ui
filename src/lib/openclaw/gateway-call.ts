@@ -19,6 +19,22 @@ type CallOptions = {
   expectFinal?: boolean;
 };
 
+function redactSecrets(message: string, auth?: Auth): string {
+  let out = message;
+  out = out.replace(/--token\s+\S+/gi, "--token ***");
+  out = out.replace(/--password\s+\S+/gi, "--password ***");
+  const secrets = [
+    auth?.token,
+    auth?.password,
+    process.env.OPENCLAW_GATEWAY_TOKEN,
+    process.env.OPENCLAW_GATEWAY_PASSWORD,
+  ].filter(Boolean) as string[];
+  for (const secret of secrets) {
+    out = out.split(secret).join("***");
+  }
+  return out;
+}
+
 function parseCliJson(stdout: string): unknown {
   const lines = stdout
     .split(/\r?\n/)
@@ -43,26 +59,43 @@ function parseCliJson(stdout: string): unknown {
 }
 
 async function callViaCli(options: CallOptions): Promise<unknown> {
+  const auth: Auth = {
+    token: options.auth?.token || process.env.OPENCLAW_GATEWAY_TOKEN,
+    password: options.auth?.password || process.env.OPENCLAW_GATEWAY_PASSWORD,
+  };
   const bin = process.env.OPENCLAW_GATEWAY_CLI_BIN || "openclaw";
   const args = ["gateway", "call", options.method, "--params", JSON.stringify(options.params ?? {})];
   if (options.url) args.push("--url", options.url);
-  if (options.auth?.token) args.push("--token", options.auth.token);
-  if (options.auth?.password) args.push("--password", options.auth.password);
+  if (auth.token) args.push("--token", auth.token);
+  if (auth.password) args.push("--password", auth.password);
 
-  const { stdout, stderr } = await execFileAsync(bin, args, {
-    timeout: options.timeoutMs ?? 15000,
-    maxBuffer: 2 * 1024 * 1024,
-    env: process.env,
-  });
+  let stdout = "";
+  let stderr = "";
+  try {
+    const result = await execFileAsync(bin, args, {
+      timeout: options.timeoutMs ?? 15000,
+      maxBuffer: 2 * 1024 * 1024,
+      env: process.env,
+    });
+    stdout = result.stdout;
+    stderr = result.stderr;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(redactSecrets(message, auth));
+  }
 
   if (stderr && stderr.trim().length > 0 && !stdout.trim().length) {
-    throw new Error(stderr.trim());
+    throw new Error(redactSecrets(stderr.trim(), auth));
   }
 
   return parseCliJson(stdout);
 }
 
 export async function callGateway(options: CallOptions): Promise<unknown> {
+  const auth: Auth = {
+    token: options.auth?.token || process.env.OPENCLAW_GATEWAY_TOKEN,
+    password: options.auth?.password || process.env.OPENCLAW_GATEWAY_PASSWORD,
+  };
   const mode = (process.env.OPENCLAW_GATEWAY_TRANSPORT || "auto").toLowerCase();
 
   if (mode === "cli") {
@@ -72,7 +105,7 @@ export async function callGateway(options: CallOptions): Promise<unknown> {
   if (mode === "ws") {
     return await openclawRpc({
       url: options.url,
-      auth: options.auth,
+      auth,
       method: options.method,
       params: options.params,
       timeoutMs: options.timeoutMs,
@@ -83,18 +116,18 @@ export async function callGateway(options: CallOptions): Promise<unknown> {
   try {
     return await openclawRpc({
       url: options.url,
-      auth: options.auth,
+      auth,
       method: options.method,
       params: options.params,
       timeoutMs: options.timeoutMs,
       expectFinal: options.expectFinal,
     });
   } catch (error) {
-    const wsMessage = error instanceof Error ? error.message : String(error);
+    const wsMessage = redactSecrets(error instanceof Error ? error.message : String(error), auth);
     try {
-      return await callViaCli(options);
+      return await callViaCli({ ...options, auth });
     } catch (cliError) {
-      const cliMessage = cliError instanceof Error ? cliError.message : String(cliError);
+      const cliMessage = redactSecrets(cliError instanceof Error ? cliError.message : String(cliError), auth);
       throw new Error(`Gateway call failed (ws + cli): ${wsMessage} | ${cliMessage}`);
     }
   }

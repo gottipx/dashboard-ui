@@ -2126,23 +2126,52 @@ export function OpenclawDashboard() {
   const loadGatewayAgents = async () => {
     if (!gatewayUrl.trim()) return;
     try {
-      const result = await gatewayApi<{ agents: unknown[] }>("/api/openclaw/gateway/agents", {
+      const result = await gatewayApi<{ agents: unknown[]; source?: string; warning?: string }>("/api/openclaw/gateway/agents", {
         url: gatewayUrl.trim(),
         token: gatewayToken.trim() || undefined,
         password: gatewayPassword.trim() || undefined,
         action: "list",
       });
-      setGatewayAgents(
-        (result.agents ?? []).map((entry) => {
+      const mapped = (result.agents ?? []).map((entry) => {
           const row = entry as Record<string, unknown>;
           return {
-            id: typeof row.id === "string" ? row.id : undefined,
-            name: typeof row.name === "string" ? row.name : undefined,
+            id:
+              typeof row.id === "string"
+                ? row.id
+                : typeof row.deviceId === "string"
+                  ? row.deviceId
+                  : typeof row.nodeId === "string"
+                    ? row.nodeId
+                    : undefined,
+            name:
+              typeof row.name === "string"
+                ? row.name
+                : typeof row.label === "string"
+                  ? row.label
+                  : typeof row.title === "string"
+                    ? row.title
+                    : undefined,
             workspace: typeof row.workspace === "string" ? row.workspace : undefined,
             default: Boolean(row.default),
           };
-        })
-      );
+        });
+      if (mapped.length > 0) {
+        setGatewayAgents(mapped);
+      } else if (gatewayNodes.length > 0) {
+        setGatewayAgents(
+          gatewayNodes.map((node, idx) => ({
+            id: `node-${idx + 1}`,
+            name: node.name,
+            workspace: undefined,
+            default: false,
+          }))
+        );
+      } else {
+        setGatewayAgents([]);
+      }
+      if (result.warning) {
+        setDashboardNotice({ type: "success", message: result.warning });
+      }
     } catch (error) {
       setDashboardNotice({ type: "error", message: error instanceof Error ? error.message : "Loading agents failed" });
     }

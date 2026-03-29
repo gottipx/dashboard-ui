@@ -2179,6 +2179,15 @@ export function OpenclawDashboard() {
         });
       if (mapped.length > 0) {
         setGatewayAgents(mapped);
+        setAgents(
+          mapped.map((agent) => ({
+            name: agent.name || agent.id || "gateway-agent",
+            state: "ready",
+            info: agent.workspace ? `Workspace: ${agent.workspace}` : "Connected via gateway",
+            logs: [],
+          }))
+        );
+        setSelectedAgentName(mapped[0].name || mapped[0].id || "gateway-agent");
       } else if (gatewayNodes.length > 0) {
         setGatewayAgents(
           gatewayNodes.map((node, idx) => ({

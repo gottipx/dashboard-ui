@@ -29,6 +29,21 @@ function parseAgents(configPayload: unknown) {
   };
 }
 
+function extractArray(payload: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const value = payload[key];
+    if (Array.isArray(value)) return value;
+    if (value && typeof value === "object") {
+      const asObject = value as Record<string, unknown>;
+      const objectValues = Object.values(asObject);
+      if (objectValues.length > 0 && objectValues.every((entry) => entry && typeof entry === "object")) {
+        return objectValues;
+      }
+    }
+  }
+  return [] as unknown[];
+}
+
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as Body;
@@ -125,19 +140,28 @@ export async function POST(request: Request) {
         timeoutMs: 10000,
       });
       const payload = (presencePayload ?? {}) as Record<string, unknown>;
-      const items = Array.isArray(payload.items) ? payload.items : [];
+      const items = extractArray(payload, ["items", "devices", "peers", "nodes", "presence"]);
       const agents = items
         .map((entry, idx) => {
           const row = entry as Record<string, unknown>;
           const roles = Array.isArray(row.roles) ? row.roles.map(String) : [];
-          if (roles.length > 0 && !roles.includes("node")) return null;
+          if (roles.length > 0 && !roles.includes("node") && !roles.includes("agent") && !roles.includes("worker")) return null;
           return {
-            id: typeof row.deviceId === "string" ? row.deviceId : `presence-${idx + 1}`,
+            id:
+              typeof row.deviceId === "string"
+                ? row.deviceId
+                : typeof row.id === "string"
+                  ? row.id
+                  : typeof row.nodeId === "string"
+                    ? row.nodeId
+                    : `presence-${idx + 1}`,
             name:
               typeof row.name === "string"
                 ? row.name
                 : typeof row.label === "string"
                   ? row.label
+                  : typeof row.title === "string"
+                    ? row.title
                   : typeof row.deviceId === "string"
                     ? row.deviceId
                     : "Gateway Presence",

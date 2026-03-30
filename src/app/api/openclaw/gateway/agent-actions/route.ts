@@ -24,7 +24,8 @@ function asObject(input: unknown): Record<string, unknown> {
 }
 
 function extractSessions(payload: unknown) {
-  const source = asObject(payload);
+  const root = asObject(payload);
+  const source = asObject(root.payload ?? root.data ?? payload);
   const items = Array.isArray(source.items)
     ? source.items
     : Array.isArray(source.sessions)
@@ -70,23 +71,37 @@ async function firstSuccessfulCliOptional(attempts: string[][]) {
   return { payload: null, source: "none", error: errors.join(" | ") };
 }
 
+async function firstSuccessfulGatewayCall(methods: string[], params: Record<string, unknown>) {
+  const attempts = methods.map((method) => ["gateway", "call", method, "--params", JSON.stringify(params)]);
+  return await firstSuccessfulCli(attempts);
+}
+
+async function firstSuccessfulGatewayCallOptional(methods: string[], params: Record<string, unknown>) {
+  const attempts = methods.map((method) => ["gateway", "call", method, "--params", JSON.stringify(params)]);
+  return await firstSuccessfulCliOptional(attempts);
+}
+
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as Body;
 
     if (body.action === "sessions") {
-      const result = await firstSuccessfulCliOptional([
+      const gatewayResult = await firstSuccessfulGatewayCallOptional(["sessions.list", "session.list"], {});
+      const cliResult = await firstSuccessfulCliOptional([
         ["sessions", "list", "--json"],
         ["session", "list", "--json"],
-        ["status", "--json"],
       ]);
-      const sessions = result.payload ? extractSessions(result.payload) : [];
+      const payload = gatewayResult.payload ?? cliResult.payload;
+      const sessions = payload ? extractSessions(payload) : [];
       const filtered = body.agentId?.trim() ? sessions.filter((row) => includesAgent(row, body.agentId!)) : sessions;
       return NextResponse.json({
         ok: true,
         sessions: filtered,
-        source: result.source,
-        warning: result.error && filtered.length === 0 ? `Sessions unavailable via CLI. ${result.error}` : undefined,
+        source: gatewayResult.payload ? gatewayResult.source : cliResult.source,
+        warning:
+          !gatewayResult.payload && !cliResult.payload
+            ? `Sessions unavailable via CLI/gateway-call. ${gatewayResult.error || ""} ${cliResult.error || ""}`.trim()
+            : undefined,
       });
     }
 
@@ -96,11 +111,19 @@ export async function POST(request: Request) {
       if (!message || !agentId) {
         return NextResponse.json({ error: "Agent and message are required." }, { status: 400 });
       }
-      const result = await firstSuccessfulCli([
-        ["agent", "chat", "--id", agentId, "--message", message, "--json"],
-        ["agents", "chat", "--id", agentId, "--message", message, "--json"],
-        ["chat", "--agent", agentId, "--message", message, "--json"],
-      ]);
+      const result = await firstSuccessfulGatewayCall(
+        ["agent.chat", "agent.message", "session.message", "chat.send", "assistant.message"],
+        {
+          agentId,
+          agent: agentId,
+          nodeId: agentId,
+          id: agentId,
+          message,
+          text: message,
+          prompt: message,
+          input: message,
+        }
+      );
       return NextResponse.json({ ok: true, payload: result.payload, source: result.source });
     }
 
@@ -112,11 +135,27 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: "Task title and target agent are required." }, { status: 400 });
       }
       const description = task.description || "";
-      const result = await firstSuccessfulCli([
-        ["tasks", "create", "--agent", agentId, "--title", title, "--description", description, "--json"],
-        ["task", "create", "--agent", agentId, "--title", title, "--description", description, "--json"],
-        ["agent", "task", "--id", agentId, "--title", title, "--description", description, "--json"],
-      ]);
+      const result = await firstSuccessfulGatewayCall(
+        ["task.create", "tasks.create", "agent.task", "agent.assign", "work.enqueue"],
+        {
+          agentId,
+          agent: agentId,
+          nodeId: agentId,
+          task: {
+            id: task.id,
+            title,
+            description,
+            project: task.project || "",
+            priority: task.priority || "Medium",
+            status: task.status || "Todo",
+          },
+          title,
+          description,
+          project: task.project || "",
+          priority: task.priority || "Medium",
+          status: task.status || "Todo",
+        }
+      );
       return NextResponse.json({ ok: true, payload: result.payload, source: result.source });
     }
 

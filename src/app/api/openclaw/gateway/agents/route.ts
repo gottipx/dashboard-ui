@@ -28,7 +28,8 @@ function asObject(input: unknown): Record<string, unknown> {
 }
 
 function toArray(payload: unknown, keys: string[]) {
-  const obj = asObject(payload);
+  const root = asObject(payload);
+  const obj = asObject(root.payload ?? root.data ?? payload);
   for (const key of keys) {
     const value = obj[key];
     if (Array.isArray(value)) return value;
@@ -182,6 +183,19 @@ async function firstSuccessfulCli<T = unknown>(attempts: string[][]) {
   return { payload: null as T | null, source: "none", error: errors.join(" | ") };
 }
 
+async function firstSuccessfulCliOptional<T = unknown>(attempts: string[][]) {
+  const errors: string[] = [];
+  for (const args of attempts) {
+    try {
+      return { payload: (await runOpenclawCliJson(args, 12000)) as T, source: args.join(" "), warning: undefined as string | undefined };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      errors.push(`${args.join(" ")}: ${message.split("\n")[0]}`);
+    }
+  }
+  return { payload: null as T | null, source: "none", warning: errors.join(" | ") };
+}
+
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as Body;
@@ -209,9 +223,9 @@ export async function POST(request: Request) {
     }
 
     const [agentResult, nodesResult, sessionsResult, logTail] = await Promise.all([
-      firstSuccessfulCli([["agents", "list", "--json"], ["agent", "list", "--json"]]),
-      firstSuccessfulCli([["nodes", "status", "--json"], ["nodes", "list", "--json"]]),
-      firstSuccessfulCli([["sessions", "list", "--json"], ["session", "list", "--json"]]),
+      firstSuccessfulCliOptional([["agents", "list", "--json"], ["agent", "list", "--json"], ["gateway", "call", "config.get", "--params", "{}"]]),
+      firstSuccessfulCliOptional([["nodes", "status", "--json"], ["nodes", "list", "--json"], ["gateway", "call", "node.list", "--params", "{}"]]),
+      firstSuccessfulCliOptional([["gateway", "call", "sessions.list", "--params", "{}"], ["sessions", "list", "--json"], ["session", "list", "--json"]]),
       loadCliLogTail(),
     ]);
 
@@ -234,7 +248,10 @@ export async function POST(request: Request) {
       ok: true,
       agents: enriched,
       source: fromAgents.length > 0 ? agentResult.source : nodesResult.source,
-      warning: fromAgents.length > 0 ? undefined : "Agent inventory resolved from node status fallback.",
+      warning:
+        fromAgents.length > 0
+          ? sessionsResult.warning
+          : `Agent inventory resolved from node status fallback.${sessionsResult.warning ? ` ${sessionsResult.warning}` : ""}`,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "OpenClaw agents CLI failed";

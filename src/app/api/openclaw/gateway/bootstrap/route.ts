@@ -9,7 +9,8 @@ function asObject(input: unknown): Record<string, unknown> {
 }
 
 function extractArray(payload: unknown, keys: string[]) {
-  const obj = asObject(payload);
+  const root = asObject(payload);
+  const obj = asObject(root.payload ?? root.data ?? payload);
   for (const key of keys) {
     const value = obj[key];
     if (Array.isArray(value)) return value;
@@ -34,9 +35,9 @@ export async function POST() {
   try {
     const [status, nodes, sessions, agents] = await Promise.all([
       probeCli([["status", "--json"], ["doctor", "--json"]]),
-      probeCli([["nodes", "status", "--json"], ["nodes", "list", "--json"]]),
-      probeCli([["sessions", "list", "--json"], ["session", "list", "--json"]]),
-      probeCli([["agents", "list", "--json"], ["agent", "list", "--json"]]),
+      probeCli([["nodes", "status", "--json"], ["nodes", "list", "--json"], ["gateway", "call", "node.list", "--params", "{}"]]),
+      probeCli([["gateway", "call", "sessions.list", "--params", "{}"], ["sessions", "list", "--json"], ["session", "list", "--json"]]),
+      probeCli([["agents", "list", "--json"], ["agent", "list", "--json"], ["gateway", "call", "config.get", "--params", "{}"]]),
     ]);
 
     const nodesItems = extractArray(nodes, ["items", "nodes"]);
@@ -74,4 +75,3 @@ export async function POST() {
     return NextResponse.json({ ok: false, error: message }, { status: 500 });
   }
 }
-

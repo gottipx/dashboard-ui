@@ -313,6 +313,17 @@ function statusMeaningFromIssueLane(lane: LaneId) {
   return "Gray: backlog";
 }
 
+function parseLogLine(line: string) {
+  const trimmed = line.trim();
+  const tsMatch = trimmed.match(/^(\d{2}:\d{2}:\d{2}|\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}[^\s]*)\s*(.*)$/);
+  const levelMatch = trimmed.match(/\b(ERROR|WARN|INFO|DEBUG|TRACE)\b/i);
+  return {
+    timestamp: tsMatch ? tsMatch[1] : "",
+    message: tsMatch ? tsMatch[2] : trimmed,
+    level: levelMatch ? levelMatch[1].toUpperCase() : "",
+  };
+}
+
 function PieChart({ title, subtitle, segments }: { title: string; subtitle: string; segments: PieSegment[] }) {
   const total = segments.reduce((sum, segment) => sum + segment.value, 0) || 1;
   const gradient = segments
@@ -813,6 +824,7 @@ export function OpenclawDashboard() {
   const [gatewayActionLoading, setGatewayActionLoading] = useState(false);
   const [openclawLogSource, setOpenclawLogSource] = useState<string>("");
   const [logRange, setLogRange] = useState<"all" | "12h">("all");
+  const [sessionsScope, setSessionsScope] = useState<"all" | "selected">("all");
   const [autoDispatchTasks, setAutoDispatchTasks] = useState(true);
 
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -2221,7 +2233,7 @@ export function OpenclawDashboard() {
       setGatewayStatus(statusLabel);
       setGatewayConnected(true);
       await loadGatewayAgents();
-      await loadGatewaySessions();
+      await loadGatewaySessions(undefined, "all");
       await loadGatewayFiles(".");
       await loadAgentLogs(undefined, logRange);
       setDashboardNotice({ type: "success", message: "OpenClaw CLI synced." });
@@ -2303,11 +2315,11 @@ export function OpenclawDashboard() {
     }
   };
 
-  const loadGatewaySessions = async (agentId?: string) => {
+  const loadGatewaySessions = async (agentId?: string, scope: "all" | "selected" = sessionsScope) => {
     try {
       const result = await runAgentAction<{ sessions?: unknown[]; warning?: string }>({
         action: "sessions",
-        agentId: agentId?.trim() || undefined,
+        agentId: scope === "selected" ? agentId?.trim() || undefined : undefined,
       });
       const mapped = (result.sessions ?? []).map((entry) => {
         const row = entry as Record<string, unknown>;
@@ -2467,12 +2479,12 @@ export function OpenclawDashboard() {
 
   useEffect(() => {
     if (!gatewayConnected) return;
+    void loadGatewaySessions(gatewaySelectedAgent, sessionsScope);
     if (!gatewaySelectedAgent.trim()) return;
-    void loadGatewaySessions(gatewaySelectedAgent);
     void loadGatewayFiles(".");
     void loadAgentLogs(gatewaySelectedAgent, logRange);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gatewayConnected, gatewaySelectedAgent, logRange]);
+  }, [gatewayConnected, gatewaySelectedAgent, logRange, sessionsScope]);
 
   const signIn = async () => {
     if (!email || !password) return;
@@ -3187,9 +3199,29 @@ export function OpenclawDashboard() {
                         {(selectedAgent?.logs?.length ?? 0) === 0 && (
                           <p className="text-zinc-400">No agent-specific log lines returned yet. Trigger activity and sync again.</p>
                         )}
-                        {(selectedAgent?.logs ?? []).map((line, idx) => (
-                          <p key={`${selectedAgent?.name}-${idx}`}>{line}</p>
-                        ))}
+                        {(selectedAgent?.logs ?? []).map((line, idx) => {
+                          const parsed = parseLogLine(line);
+                          return (
+                            <p key={`${selectedAgent?.name}-${idx}`} className="grid grid-cols-[auto_auto_1fr] gap-2">
+                              <span className="text-zinc-500">{parsed.timestamp || "--:--:--"}</span>
+                              <span
+                                className={cn(
+                                  "min-w-[42px]",
+                                  parsed.level === "ERROR"
+                                    ? "text-rose-400"
+                                    : parsed.level === "WARN"
+                                      ? "text-amber-300"
+                                      : parsed.level === "INFO"
+                                        ? "text-sky-300"
+                                        : "text-zinc-400"
+                                )}
+                              >
+                                {parsed.level || "LOG"}
+                              </span>
+                              <span>{parsed.message}</span>
+                            </p>
+                          );
+                        })}
                       </div>
                     </ScrollArea>
                   </CardContent>
@@ -3841,9 +3873,29 @@ export function OpenclawDashboard() {
                       {(selectedAgent?.logs?.length ?? 0) === 0 && (
                         <p className="text-zinc-400">No agent-specific lines matched; showing global OpenClaw logs when available.</p>
                       )}
-                      {(selectedAgent?.logs ?? []).map((line, idx) => (
-                        <p key={`${selectedAgent?.name}-${idx}`}>{line}</p>
-                      ))}
+                      {(selectedAgent?.logs ?? []).map((line, idx) => {
+                        const parsed = parseLogLine(line);
+                        return (
+                          <p key={`${selectedAgent?.name}-${idx}`} className="grid grid-cols-[auto_auto_1fr] gap-2">
+                            <span className="text-zinc-500">{parsed.timestamp || "--:--:--"}</span>
+                            <span
+                              className={cn(
+                                "min-w-[42px]",
+                                parsed.level === "ERROR"
+                                  ? "text-rose-400"
+                                  : parsed.level === "WARN"
+                                    ? "text-amber-300"
+                                    : parsed.level === "INFO"
+                                      ? "text-sky-300"
+                                      : "text-zinc-400"
+                              )}
+                            >
+                              {parsed.level || "LOG"}
+                            </span>
+                            <span>{parsed.message}</span>
+                          </p>
+                        );
+                      })}
                     </div>
                   </ScrollArea>
                 </CardContent>
@@ -3866,10 +3918,8 @@ export function OpenclawDashboard() {
               <div className="space-y-3">
                 <Card>
                   <CardHeader>
-                    <CardTitle>OpenClaw CLI</CardTitle>
-                    <CardDescription>
-                      CLI-backed agent workspace and session management.
-                    </CardDescription>
+                    <CardTitle>Agents Control</CardTitle>
+                    <CardDescription>Select an agent on the left, inspect sessions on the right, then edit workspace files below.</CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-3">
                     <div className="flex flex-wrap items-center gap-2">
@@ -3921,7 +3971,7 @@ export function OpenclawDashboard() {
                         <Button variant="outline" onClick={() => void loadGatewayAgents()}>
                           Reload Agents
                         </Button>
-                        <Button variant="outline" onClick={() => void loadGatewaySessions(gatewaySelectedAgent)}>
+                        <Button variant="outline" onClick={() => void loadGatewaySessions(gatewaySelectedAgent, sessionsScope)}>
                           Reload Sessions
                         </Button>
                         <Button onClick={() => void createGatewayAgent()}>Create Agent</Button>
@@ -3943,18 +3993,56 @@ export function OpenclawDashboard() {
                   <Card>
                     <CardHeader>
                       <CardTitle>Sessions</CardTitle>
-                      <CardDescription>Live agent session history and runtime state.</CardDescription>
+                      <CardDescription>Live OpenClaw session stream.</CardDescription>
                     </CardHeader>
-                    <CardContent className="space-y-1 text-sm">
+                    <CardContent className="space-y-2 text-sm">
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          size="sm"
+                          variant={sessionsScope === "all" ? "default" : "outline"}
+                          onClick={() => setSessionsScope("all")}
+                        >
+                          All Sessions
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant={sessionsScope === "selected" ? "default" : "outline"}
+                          onClick={() => setSessionsScope("selected")}
+                        >
+                          Selected Agent
+                        </Button>
+                      </div>
                       {gatewaySessions.length === 0 && <p className="text-muted-foreground">No sessions loaded yet.</p>}
-                      {gatewaySessions.map((session, idx) => (
-                        <div key={`${session.id || session.key || idx}`} className="rounded-md border p-2">
-                          <p className="font-medium">{session.key || session.id || "Session"}</p>
-                          <p className="text-xs text-muted-foreground">{session.state || "unknown state"}</p>
+                      <ScrollArea className="h-[220px] rounded-md border p-2">
+                        <div className="space-y-1">
+                          {gatewaySessions.map((session, idx) => (
+                            <div key={`${session.id || session.key || idx}`} className="rounded-md border p-2">
+                              <p className="font-medium">{session.key || session.id || "Session"}</p>
+                              <p className="text-xs text-muted-foreground">{session.state || "unknown state"}</p>
+                            </div>
+                          ))}
                         </div>
-                      ))}
+                      </ScrollArea>
                       <Separator />
                       <p className="text-xs text-muted-foreground">Connected nodes: {gatewayNodes.length}</p>
+                      <div className="space-y-2">
+                        <p className="text-xs font-medium text-muted-foreground">Chat with selected agent</p>
+                        <Textarea
+                          value={gatewayChatMessage}
+                          onChange={(event) => setGatewayChatMessage(event.target.value)}
+                          placeholder="Write a task or instruction..."
+                          className="min-h-[84px]"
+                        />
+                        <div className="flex items-center gap-2">
+                          <Button onClick={() => void runAgentChat()} disabled={gatewayActionLoading}>
+                            {gatewayActionLoading ? "Sending..." : "Send"}
+                          </Button>
+                          <p className="text-xs text-muted-foreground">Agent: {gatewaySelectedAgent || "not selected"}</p>
+                        </div>
+                        <ScrollArea className="h-24 rounded-lg border bg-zinc-950 p-2 text-xs text-zinc-200">
+                          <pre className="whitespace-pre-wrap font-mono">{gatewayChatResult || "No response yet."}</pre>
+                        </ScrollArea>
+                      </div>
                     </CardContent>
                   </Card>
                 </div>
@@ -4072,29 +4160,6 @@ export function OpenclawDashboard() {
                   </CardContent>
                 </Card>
 
-                <Card>
-                  <CardHeader>
-                    <CardTitle>Agent Chat</CardTitle>
-                    <CardDescription>Send direct instructions to the selected agent and inspect the response payload.</CardDescription>
-                  </CardHeader>
-                  <CardContent className="space-y-2">
-                    <Textarea
-                      value={gatewayChatMessage}
-                      onChange={(event) => setGatewayChatMessage(event.target.value)}
-                      placeholder="Write a task or instruction for the selected agent..."
-                      className="min-h-[100px]"
-                    />
-                    <div className="flex items-center gap-2">
-                      <Button onClick={() => void runAgentChat()} disabled={gatewayActionLoading}>
-                        {gatewayActionLoading ? "Sending..." : "Send to Agent"}
-                      </Button>
-                      <p className="text-xs text-muted-foreground">Agent: {gatewaySelectedAgent || "not selected"}</p>
-                    </div>
-                    <ScrollArea className="h-36 rounded-lg border bg-zinc-950 p-3 text-xs text-zinc-200">
-                      <pre className="whitespace-pre-wrap font-mono">{gatewayChatResult || "No response yet."}</pre>
-                    </ScrollArea>
-                  </CardContent>
-                </Card>
               </div>
             </TabsContent>
 

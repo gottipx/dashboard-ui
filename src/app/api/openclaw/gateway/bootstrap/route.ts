@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { callGateway } from "@/lib/openclaw/gateway-call";
 import { runOpenclawCliJson } from "@/lib/openclaw/cli";
+import { resolveGatewayRuntime } from "@/lib/openclaw/runtime-config";
 
 export const runtime = "nodejs";
 
@@ -14,18 +15,15 @@ type BootstrapBody = {
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as BootstrapBody;
-    if (!body.url) {
-      return NextResponse.json({ error: "Missing gateway url." }, { status: 400 });
-    }
-
-    const auth = { token: body.token, password: body.password };
+    const runtime = resolveGatewayRuntime(body);
+    const auth = runtime.auth;
 
     const [status, health, presence, nodes, sessions] = await Promise.allSettled([
-      callGateway({ url: body.url, auth, method: "status", params: {} }),
-      callGateway({ url: body.url, auth, method: "health", params: {} }),
-      callGateway({ url: body.url, auth, method: "system-presence", params: {} }),
-      callGateway({ url: body.url, auth, method: "node.list", params: {} }),
-      callGateway({ url: body.url, auth, method: "sessions.list", params: {} }),
+      callGateway({ url: runtime.url, auth, method: "status", params: {} }),
+      callGateway({ url: runtime.url, auth, method: "health", params: {} }),
+      callGateway({ url: runtime.url, auth, method: "system-presence", params: {} }),
+      callGateway({ url: runtime.url, auth, method: "node.list", params: {} }),
+      callGateway({ url: runtime.url, auth, method: "sessions.list", params: {} }),
     ]);
 
     const unwrap = (result: PromiseSettledResult<unknown>) =>
@@ -46,6 +44,11 @@ export async function POST(request: Request) {
     return NextResponse.json({
       ok: true,
       data: {
+        connection: {
+          transport: (process.env.OPENCLAW_GATEWAY_TRANSPORT || "cli").toLowerCase(),
+          target: runtime.url || "cli-config",
+          configuredByServer: runtime.configuredByServer,
+        },
         status: unwrap(status),
         health: unwrap(health),
         presence: unwrap(presence),

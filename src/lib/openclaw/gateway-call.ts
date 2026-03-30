@@ -11,7 +11,7 @@ type Auth = {
 };
 
 type CallOptions = {
-  url: string;
+  url?: string;
   auth?: Auth;
   method: string;
   params?: Record<string, unknown>;
@@ -64,15 +64,20 @@ async function callViaCli(options: CallOptions): Promise<unknown> {
     password: options.auth?.password || process.env.OPENCLAW_GATEWAY_PASSWORD,
   };
   const bin = process.env.OPENCLAW_GATEWAY_CLI_BIN || "openclaw";
+  const prefix = process.env.OPENCLAW_GATEWAY_CLI_PREFIX?.trim();
   const args = ["gateway", "call", options.method, "--params", JSON.stringify(options.params ?? {})];
-  if (options.url) args.push("--url", options.url);
+  if (options.url?.trim()) args.push("--url", options.url.trim());
   if (auth.token) args.push("--token", auth.token);
   if (auth.password) args.push("--password", auth.password);
+  const command = !prefix ? bin : prefix.split(/\s+/).filter(Boolean)[0];
+  const commandArgs = !prefix
+    ? args
+    : [...prefix.split(/\s+/).filter(Boolean).slice(1), bin, ...args];
 
   let stdout = "";
   let stderr = "";
   try {
-    const result = await execFileAsync(bin, args, {
+    const result = await execFileAsync(command, commandArgs, {
       timeout: options.timeoutMs ?? 15000,
       maxBuffer: 2 * 1024 * 1024,
       env: process.env,
@@ -96,15 +101,18 @@ export async function callGateway(options: CallOptions): Promise<unknown> {
     token: options.auth?.token || process.env.OPENCLAW_GATEWAY_TOKEN,
     password: options.auth?.password || process.env.OPENCLAW_GATEWAY_PASSWORD,
   };
-  const mode = (process.env.OPENCLAW_GATEWAY_TRANSPORT || "auto").toLowerCase();
+  const mode = (process.env.OPENCLAW_GATEWAY_TRANSPORT || "cli").toLowerCase();
 
   if (mode === "cli") {
     return await callViaCli(options);
   }
 
   if (mode === "ws") {
+    if (!options.url?.trim()) {
+      throw new Error("Gateway URL is required for ws transport.");
+    }
     return await openclawRpc({
-      url: options.url,
+      url: options.url.trim(),
       auth,
       method: options.method,
       params: options.params,
@@ -114,8 +122,11 @@ export async function callGateway(options: CallOptions): Promise<unknown> {
   }
 
   try {
+    if (!options.url?.trim()) {
+      throw new Error("Gateway URL is required for ws transport.");
+    }
     return await openclawRpc({
-      url: options.url,
+      url: options.url.trim(),
       auth,
       method: options.method,
       params: options.params,

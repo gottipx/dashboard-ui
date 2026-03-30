@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { callGateway } from "@/lib/openclaw/gateway-call";
 import { runOpenclawCliJson } from "@/lib/openclaw/cli";
+import { resolveGatewayRuntime } from "@/lib/openclaw/runtime-config";
 
 export const runtime = "nodejs";
 
@@ -157,12 +158,13 @@ function enrichAgentsWithRuntime(agents: RuntimeAgent[], sessionsPayload?: unkno
   });
 }
 
-async function callSessionsList(url: string, auth: { token?: string; password?: string }) {
+async function callSessionsList(url: string | undefined, auth: { token?: string; password?: string }) {
   try {
     return await callGateway({ url, auth, method: "sessions.list", params: {}, timeoutMs: 10000 });
   } catch {
     try {
-      const args = ["gateway", "call", "sessions.list", "--params", "{}", "--url", url];
+      const args = ["gateway", "call", "sessions.list", "--params", "{}"];
+      if (url?.trim()) args.push("--url", url.trim());
       if (auth.token) args.push("--token", auth.token);
       if (auth.password) args.push("--password", auth.password);
       return await runOpenclawCliJson(args, 12000);
@@ -172,13 +174,77 @@ async function callSessionsList(url: string, auth: { token?: string; password?: 
   }
 }
 
+function toAgentsFromUnknown(payload: unknown): RuntimeAgent[] {
+  const container = asObject(payload);
+  const candidates: unknown[] = [];
+  if (Array.isArray(payload)) candidates.push(...payload);
+  const arrayKeys = ["items", "agents", "nodes", "list", "data"];
+  for (const key of arrayKeys) {
+    const value = container[key];
+    if (Array.isArray(value)) candidates.push(...value);
+  }
+  return candidates.map((entry, idx) => {
+    const row = asObject(entry);
+    return {
+      id:
+        typeof row.id === "string"
+          ? row.id
+          : typeof row.agentId === "string"
+            ? row.agentId
+            : typeof row.agent_id === "string"
+              ? row.agent_id
+              : typeof row.nodeId === "string"
+                ? row.nodeId
+                : `agent-${idx + 1}`,
+      name:
+        typeof row.name === "string"
+          ? row.name
+          : typeof row.label === "string"
+            ? row.label
+            : typeof row.title === "string"
+              ? row.title
+              : typeof row.id === "string"
+                ? row.id
+                : "OpenClaw Agent",
+      workspace: typeof row.workspace === "string" ? row.workspace : undefined,
+    };
+  });
+}
+
+async function cliAgentFallbacks(url?: string, auth?: { token?: string; password?: string }) {
+  const base = [] as string[];
+  if (url?.trim()) base.push("--url", url.trim());
+  if (auth?.token) base.push("--token", auth.token);
+  if (auth?.password) base.push("--password", auth.password);
+  const attempts: string[][] = [
+    ["gateway", "call", "config.get", "--params", "{}", ...base],
+    ["gateway", "call", "node.list", "--params", "{}", ...base],
+    ["nodes", "status", "--json"],
+    ["agents", "list", "--json"],
+    ["agent", "list", "--json"],
+    ["nodes", "list", "--json"],
+  ];
+  for (const args of attempts) {
+    try {
+      const payload = await runOpenclawCliJson(args, 12000);
+      const parsed = parseAgents(payload);
+      if (parsed.list.length > 0) return parsed.list.map((entry) => asObject(entry));
+      const mapped = toAgentsFromUnknown(payload);
+      if (mapped.length > 0) return mapped;
+    } catch {
+      // continue fallback probing
+    }
+  }
+  return [] as RuntimeAgent[];
+}
+
 function isHashError(message: string) {
   const text = message.toLowerCase();
   return text.includes("base hash required") || text.includes("hash mismatch") || text.includes("re-run config.get");
 }
 
 async function patchAgentsWithRetry(args: {
-  url: string;
+  url?: string;
   auth: { token?: string; password?: string };
   nextList: unknown[];
   baseHash?: string;
@@ -215,17 +281,15 @@ async function patchAgentsWithRetry(args: {
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as Body;
-    if (!body.url) {
-      return NextResponse.json({ error: "Missing gateway url." }, { status: 400 });
-    }
-
-    const auth = { token: body.token, password: body.password };
+    const runtime = resolveGatewayRuntime(body);
+    const auth = runtime.auth;
+    const gatewayUrl = runtime.url;
 
     if (body.action === "list" || !body.action) {
-      const sessionsPayload = await callSessionsList(body.url, auth);
+      const sessionsPayload = await callSessionsList(gatewayUrl, auth);
 
       try {
-        const cfgPayload = await callGateway({ url: body.url, auth, method: "config.get", params: {}, timeoutMs: 10000 });
+        const cfgPayload = await callGateway({ url: gatewayUrl, auth, method: "config.get", params: {}, timeoutMs: 10000 });
         const cfg = parseAgents(cfgPayload);
         if (cfg.list.length > 0) {
           const normalized: RuntimeAgent[] = cfg.list.map((entry) => {
@@ -252,7 +316,7 @@ export async function POST(request: Request) {
 
       try {
         // fallback for deployments that block config methods or return empty agents list
-        const nodesPayload = await callGateway({ url: body.url, auth, method: "node.list", params: {}, timeoutMs: 10000 });
+        const nodesPayload = await callGateway({ url: gatewayUrl, auth, method: "node.list", params: {}, timeoutMs: 10000 });
         const payload = (nodesPayload ?? {}) as Record<string, unknown>;
         const items = Array.isArray(payload.items) ? payload.items : [];
         const agents = items.map((entry, idx) => {
@@ -319,7 +383,7 @@ export async function POST(request: Request) {
 
       // final fallback using presence
       const presencePayload = await callGateway({
-        url: body.url,
+        url: gatewayUrl,
         auth,
         method: "system-presence",
         params: {},
@@ -354,6 +418,25 @@ export async function POST(request: Request) {
           workspace: undefined,
         });
       }
+      if (agents.length === 0) {
+        const cliAgents = await cliAgentFallbacks(gatewayUrl, auth);
+        if (cliAgents.length > 0) {
+          return NextResponse.json({
+            ok: true,
+            agents: enrichAgentsWithRuntime(cliAgents, sessionsPayload),
+            source: "cli.fallback",
+            warning: "Using CLI fallback source for agent inventory.",
+          });
+        }
+      }
+      if (agents.length === 0) {
+        return NextResponse.json({
+          ok: true,
+          agents: [],
+          source: "none",
+          warning: "No agents discovered from gateway or CLI sources.",
+        });
+      }
       return NextResponse.json({
         ok: true,
         agents: enrichAgentsWithRuntime(agents, sessionsPayload),
@@ -363,7 +446,7 @@ export async function POST(request: Request) {
     }
 
     if (body.action === "create") {
-      const cfgPayload = await callGateway({ url: body.url, auth, method: "config.get", params: {}, timeoutMs: 10000 });
+      const cfgPayload = await callGateway({ url: gatewayUrl, auth, method: "config.get", params: {}, timeoutMs: 10000 });
       const cfg = parseAgents(cfgPayload);
       const id = body.agent?.id?.trim();
       const name = body.agent?.name?.trim();
@@ -388,7 +471,7 @@ export async function POST(request: Request) {
       };
       const nextList = [...cfg.list, nextAgent];
       const patchResult = await patchAgentsWithRetry({
-        url: body.url,
+        url: gatewayUrl,
         auth,
         nextList,
         baseHash: cfg.hash,

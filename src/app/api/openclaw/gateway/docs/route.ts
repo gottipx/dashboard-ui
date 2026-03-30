@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { callGateway } from "@/lib/openclaw/gateway-call";
+import { resolveGatewayRuntime } from "@/lib/openclaw/runtime-config";
 
 export const runtime = "nodejs";
 
@@ -18,17 +19,18 @@ type Body = {
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as Body;
-    if (!body.url || !body.path || !body.action) {
-      return NextResponse.json({ error: "Missing url, path or action." }, { status: 400 });
+    if (!body.path || !body.action) {
+      return NextResponse.json({ error: "Missing path or action." }, { status: 400 });
     }
+    const runtime = resolveGatewayRuntime(body);
 
-    const auth = { token: body.token, password: body.password };
+    const auth = runtime.auth;
     const readMethod = body.readMethod || "workspace.read";
     const writeMethod = body.writeMethod || "workspace.write";
 
     if (body.action === "read") {
       const payload = await callGateway({
-        url: body.url,
+        url: runtime.url,
         auth,
         method: readMethod,
         params: { path: body.path },
@@ -37,7 +39,7 @@ export async function POST(request: Request) {
     }
 
     const payload = await callGateway({
-      url: body.url,
+      url: runtime.url,
       auth,
       method: writeMethod,
       params: { path: body.path, content: body.content ?? "" },

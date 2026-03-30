@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { callGateway } from "@/lib/openclaw/gateway-call";
+import { resolveGatewayRuntime } from "@/lib/openclaw/runtime-config";
 
 export const runtime = "nodejs";
 
@@ -16,13 +17,14 @@ type RpcBody = {
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as RpcBody;
-    if (!body.url || !body.method) {
-      return NextResponse.json({ error: "Missing url or method." }, { status: 400 });
+    if (!body.method) {
+      return NextResponse.json({ error: "Missing method." }, { status: 400 });
     }
+    const runtime = resolveGatewayRuntime(body);
 
     const payload = await callGateway({
-      url: body.url,
-      auth: { token: body.token, password: body.password },
+      url: runtime.url,
+      auth: runtime.auth,
       method: body.method,
       params: body.params ?? {},
       expectFinal: Boolean(body.expectFinal),

@@ -214,59 +214,6 @@ const navItems: NavItem[] = [
   { id: "gateway", label: "Gateway", icon: Wifi },
 ];
 
-const initialAgentProfiles: AgentProfile[] = [
-  {
-    name: "resolver-agent",
-    state: "ready",
-    info: "Idle and ready for assignment",
-    logs: [
-      "17:04:12 Session started (id: S-8812)",
-      "17:06:10 Heartbeat ok (32ms)",
-      "17:12:27 Waiting for new tasks",
-    ],
-  },
-  {
-    name: "planner-agent",
-    state: "running",
-    info: "Planning sprint board updates",
-    logs: [
-      "17:08:05 Picked issue OC-001",
-      "17:09:44 Updated acceptance criteria",
-      "17:13:10 Syncing board lane priorities",
-    ],
-  },
-  {
-    name: "ops-watchdog",
-    state: "running",
-    info: "Monitoring and alert routing active",
-    logs: [
-      "17:03:29 Alert stream connected",
-      "17:07:33 Linked latency incident PM-000",
-      "17:14:03 Re-checking source health",
-    ],
-  },
-  {
-    name: "retriever-agent",
-    state: "down",
-    info: "Heartbeat failed; unreachable",
-    logs: [
-      "17:05:02 Source timeout detected",
-      "17:07:40 Missed 3 consecutive heartbeats",
-      "17:08:22 Agent marked unreachable",
-    ],
-  },
-  {
-    name: "qa-agent",
-    state: "ready",
-    info: "Idle and validating queued items",
-    logs: [
-      "17:01:11 Test suite baseline complete",
-      "17:10:19 No blocking regressions detected",
-      "17:15:08 Ready for next validation task",
-    ],
-  },
-];
-
 const weekDayLabels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const laneMeta: { id: LaneId; title: string }[] = [
   { id: "backlog", title: "Backlog" },
@@ -830,12 +777,10 @@ export function OpenclawDashboard() {
   const [calendarView, setCalendarView] = useState<"month" | "week">("month");
   const [darkMode, setDarkMode] = useState(true);
   const [healthHoverOpen, setHealthHoverOpen] = useState(false);
-  const [gatewayUrl, setGatewayUrl] = useState("");
-  const [gatewayToken, setGatewayToken] = useState("");
-  const [gatewayPassword, setGatewayPassword] = useState("");
   const [gatewayLoading, setGatewayLoading] = useState(false);
   const [gatewayConnected, setGatewayConnected] = useState(false);
-  const [gatewayStatus, setGatewayStatus] = useState<string>("Not connected");
+  const [gatewayStatus, setGatewayStatus] = useState<string>("Managed connection not initialized");
+  const [gatewayTarget, setGatewayTarget] = useState<string>("server-config");
   const [gatewayNodes, setGatewayNodes] = useState<AgentProfile[]>([]);
   const [gatewaySessions, setGatewaySessions] = useState<GatewaySessionEntry[]>([]);
   const [gatewayAgents, setGatewayAgents] = useState<GatewayAgentEntry[]>([]);
@@ -875,7 +820,7 @@ export function OpenclawDashboard() {
     title: "",
     description: "",
     project: "AgenticOS Core",
-    agent: initialAgentProfiles[0].name,
+    agent: "",
     priority: "Medium" as Task["priority"],
     status: "Todo" as Task["status"],
     resolvedAt: null as string | null,
@@ -885,8 +830,8 @@ export function OpenclawDashboard() {
     title: "",
     description: "",
     projectCode: "OC",
-    owner: initialAgentProfiles[0].name,
-    reporter: initialAgentProfiles[1].name,
+    owner: "",
+    reporter: "",
     issueType: "Bug" as IssueType,
     priority: "Medium" as Priority,
     storyPoints: 0,
@@ -900,10 +845,10 @@ export function OpenclawDashboard() {
     description: "",
     docs: "",
     instruction: "",
-    manager: initialAgentProfiles[0].name,
+    manager: "",
     tagIds: [] as string[],
   });
-  const [selectedAgentName, setSelectedAgentName] = useState(initialAgentProfiles[0].name);
+  const [selectedAgentName, setSelectedAgentName] = useState("");
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 3 } }));
 
@@ -942,12 +887,7 @@ export function OpenclawDashboard() {
     const raw = window.localStorage.getItem("agenticos.gateway.settings");
     if (!raw) return;
     try {
-      const parsed = JSON.parse(raw) as {
-        url?: string;
-        readMethod?: string;
-        writeMethod?: string;
-      };
-      setGatewayUrl(parsed.url ?? "");
+      const parsed = JSON.parse(raw) as { readMethod?: string; writeMethod?: string };
       setGatewayDocReadMethod(parsed.readMethod ?? "workspace.read");
       setGatewayDocWriteMethod(parsed.writeMethod ?? "workspace.write");
     } catch {
@@ -959,12 +899,11 @@ export function OpenclawDashboard() {
     window.localStorage.setItem(
       "agenticos.gateway.settings",
       JSON.stringify({
-        url: gatewayUrl,
         readMethod: gatewayDocReadMethod,
         writeMethod: gatewayDocWriteMethod,
       })
     );
-  }, [gatewayUrl, gatewayDocReadMethod, gatewayDocWriteMethod]);
+  }, [gatewayDocReadMethod, gatewayDocWriteMethod]);
 
   useEffect(() => {
     if (!userId) return;
@@ -1121,7 +1060,6 @@ export function OpenclawDashboard() {
           tagIds: row.tag_ids ?? [],
         }))
       );
-      setAgents((prev) => (prev.length > 0 ? prev : initialAgentProfiles));
       setCalendarEvents(
         eventRows.map((row) => ({
           id: row.id,
@@ -1775,8 +1713,8 @@ export function OpenclawDashboard() {
       { label: "Agents", value: `${agents.length}`, detail: "Registered agents" },
       {
         label: "Open Sessions",
-        value: `${gatewayConnected ? gatewaySessions.length : 31}`,
-        detail: gatewayConnected ? "Gateway live sessions" : "Mock live sessions",
+        value: `${gatewaySessions.length}`,
+        detail: gatewayConnected ? "Gateway live sessions" : "Service sessions",
       },
       { label: "Board Cards", value: `${totalCards}`, detail: `${completionRate}% done` },
       { label: "Issues", value: `${issues.length}`, detail: "Synced into board flow" },
@@ -1821,6 +1759,7 @@ export function OpenclawDashboard() {
 
   const projectOptions = projects.map((project) => ({ code: project.code, title: project.title }));
   const agentNames = agents.map((agent) => agent.name);
+  const agentOptions = useMemo(() => (agentNames.length > 0 ? agentNames : ["Unassigned"]), [agentNames]);
   const tagById = useMemo(() => new Map(tags.map((tag) => [tag.id, tag])), [tags]);
   const selectedAgent = agents.find((agent) => agent.name === selectedAgentName) ?? agents[0];
   const isSidebarExpanded = isSidebarPinned || isSidebarOpenedByButton;
@@ -1849,6 +1788,24 @@ export function OpenclawDashboard() {
   const deleteImpactIssueCount = projectDeleteTarget
     ? issues.filter((issue) => issue.projectCode === projectDeleteTarget.code).length
     : 0;
+
+  useEffect(() => {
+    if (!selectedAgentName && agents.length > 0) {
+      setSelectedAgentName(agents[0].name);
+    }
+    if (!newTask.agent && agentOptions.length > 0) {
+      setNewTask((prev) => ({ ...prev, agent: agentOptions[0] }));
+    }
+    if (!newIssue.owner && agentOptions.length > 0) {
+      setNewIssue((prev) => ({ ...prev, owner: agentOptions[0] }));
+    }
+    if (!newIssue.reporter && agentOptions.length > 0) {
+      setNewIssue((prev) => ({ ...prev, reporter: agentOptions[0] }));
+    }
+    if (!newProject.manager && agentOptions.length > 0) {
+      setNewProject((prev) => ({ ...prev, manager: agentOptions[0] }));
+    }
+  }, [agents, agentOptions, selectedAgentName, newTask.agent, newIssue.owner, newIssue.reporter, newProject.manager]);
   const renderTaskCard = (task: Task) => {
     const expanded = expandedTaskCardId === task.id;
     return (
@@ -2072,24 +2029,24 @@ export function OpenclawDashboard() {
   };
 
   const syncGatewayBootstrap = async () => {
-    if (!gatewayUrl.trim()) {
-      setDashboardNotice({ type: "error", message: "Please enter a gateway WebSocket URL." });
-      return;
-    }
     setGatewayLoading(true);
     try {
       const result = await gatewayApi<{ data: Record<string, unknown> }>("/api/openclaw/gateway/bootstrap", {
-        url: gatewayUrl.trim(),
-        token: gatewayToken.trim() || undefined,
-        password: gatewayPassword.trim() || undefined,
+        source: "dashboard",
       });
 
       const data = result.data ?? {};
+      const connectionPayload = (data.connection ?? {}) as Record<string, unknown>;
+      const targetLabel =
+        typeof connectionPayload.target === "string" && connectionPayload.target.trim().length > 0
+          ? connectionPayload.target
+          : "server-config";
+      setGatewayTarget(targetLabel);
       const statusPayload = (data.status ?? {}) as Record<string, unknown>;
       const statusLabel =
         typeof statusPayload.mode === "string"
           ? `${statusPayload.mode} (${String(statusPayload.pairing ?? "pairing unknown")})`
-          : "Connected";
+          : `Connected via ${String(connectionPayload.transport ?? "cli")}`;
 
       const nodePayload = (data.nodes ?? {}) as Record<string, unknown>;
       const nodeItems = Array.isArray(nodePayload.items)
@@ -2149,12 +2106,8 @@ export function OpenclawDashboard() {
   };
 
   const loadGatewayAgents = async () => {
-    if (!gatewayUrl.trim()) return;
     try {
       const result = await gatewayApi<{ agents: unknown[]; source?: string; warning?: string }>("/api/openclaw/gateway/agents", {
-        url: gatewayUrl.trim(),
-        token: gatewayToken.trim() || undefined,
-        password: gatewayPassword.trim() || undefined,
         action: "list",
       });
       const mapped = (result.agents ?? []).map((entry) => {
@@ -2218,19 +2171,12 @@ export function OpenclawDashboard() {
   };
 
   const createGatewayAgent = async () => {
-    if (!gatewayUrl.trim()) {
-      setDashboardNotice({ type: "error", message: "Set gateway URL before creating agents." });
-      return;
-    }
     if (!gatewayAgentId.trim() || !gatewayAgentName.trim()) {
       setDashboardNotice({ type: "error", message: "Agent id and agent name are required." });
       return;
     }
     try {
       await gatewayApi<{ ok: boolean }>("/api/openclaw/gateway/agents", {
-        url: gatewayUrl.trim(),
-        token: gatewayToken.trim() || undefined,
-        password: gatewayPassword.trim() || undefined,
         action: "create",
         agent: {
           id: gatewayAgentId.trim(),
@@ -2250,15 +2196,12 @@ export function OpenclawDashboard() {
   };
 
   const readGatewayDoc = async () => {
-    if (!gatewayUrl.trim() || !gatewayDocPath.trim()) {
-      setDashboardNotice({ type: "error", message: "Set gateway URL and document path first." });
+    if (!gatewayDocPath.trim()) {
+      setDashboardNotice({ type: "error", message: "Set document path first." });
       return;
     }
     try {
       const result = await gatewayApi<{ payload: unknown }>("/api/openclaw/gateway/docs", {
-        url: gatewayUrl.trim(),
-        token: gatewayToken.trim() || undefined,
-        password: gatewayPassword.trim() || undefined,
         action: "read",
         path: gatewayDocPath.trim(),
         readMethod: gatewayDocReadMethod.trim() || "workspace.read",
@@ -2278,15 +2221,12 @@ export function OpenclawDashboard() {
   };
 
   const saveGatewayDoc = async () => {
-    if (!gatewayUrl.trim() || !gatewayDocPath.trim()) {
-      setDashboardNotice({ type: "error", message: "Set gateway URL and document path first." });
+    if (!gatewayDocPath.trim()) {
+      setDashboardNotice({ type: "error", message: "Set document path first." });
       return;
     }
     try {
       await gatewayApi<{ payload: unknown }>("/api/openclaw/gateway/docs", {
-        url: gatewayUrl.trim(),
-        token: gatewayToken.trim() || undefined,
-        password: gatewayPassword.trim() || undefined,
         action: "write",
         path: gatewayDocPath.trim(),
         content: gatewayDocContent,
@@ -2299,10 +2239,10 @@ export function OpenclawDashboard() {
   };
 
   useEffect(() => {
-    if (!userId || !gatewayUrl.trim()) return;
+    if (!userId) return;
     void syncGatewayBootstrap();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId, gatewayUrl]);
+  }, [userId]);
 
   const signIn = async () => {
     if (!email || !password) return;
@@ -2879,11 +2819,11 @@ export function OpenclawDashboard() {
                       </label>
                       <select
                         id="issue-owner"
-                        value={newIssue.owner || agentNames[0] || ""}
+                        value={newIssue.owner || agentOptions[0] || ""}
                         onChange={(event) => setNewIssue((prev) => ({ ...prev, owner: event.target.value }))}
                         className="h-9 w-full rounded-md border bg-background px-2 text-sm"
                       >
-                        {agentNames.map((agent) => (
+                        {agentOptions.map((agent) => (
                           <option key={agent}>{agent}</option>
                         ))}
                       </select>
@@ -2894,11 +2834,11 @@ export function OpenclawDashboard() {
                       </label>
                       <select
                         id="issue-reporter"
-                        value={newIssue.reporter || agentNames[0] || ""}
+                        value={newIssue.reporter || agentOptions[0] || ""}
                         onChange={(event) => setNewIssue((prev) => ({ ...prev, reporter: event.target.value }))}
                         className="h-9 w-full rounded-md border bg-background px-2 text-sm"
                       >
-                        {agentNames.map((agent) => (
+                        {agentOptions.map((agent) => (
                           <option key={agent}>{agent}</option>
                         ))}
                       </select>
@@ -2980,6 +2920,11 @@ export function OpenclawDashboard() {
                     <CardDescription>Click an agent to inspect logs and current runtime status</CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-2">
+                    {agents.length === 0 && (
+                      <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
+                        No agents discovered yet. Open the Gateway tab and run Sync Gateway.
+                      </p>
+                    )}
                     {agents.map((agent) => (
                       <button
                         key={agent.name}
@@ -3213,11 +3158,11 @@ export function OpenclawDashboard() {
                             </label>
                             <select
                               id="task-agent"
-                              value={newTask.agent || agentNames[0] || ""}
+                              value={newTask.agent || agentOptions[0] || ""}
                               onChange={(event) => setNewTask((prev) => ({ ...prev, agent: event.target.value }))}
                               className="h-9 w-full rounded-md border bg-background px-2 text-sm"
                             >
-                              {agentNames.map((agent) => (
+                              {agentOptions.map((agent) => (
                                 <option key={agent}>{agent}</option>
                               ))}
                             </select>
@@ -3394,11 +3339,11 @@ export function OpenclawDashboard() {
                           </label>
                           <select
                             id="project-manager"
-                            value={newProject.manager || agentNames[0] || ""}
+                            value={newProject.manager || agentOptions[0] || ""}
                             onChange={(event) => setNewProject((prev) => ({ ...prev, manager: event.target.value }))}
                             className="h-9 w-full rounded-md border bg-background px-2 text-sm"
                           >
-                            {agentNames.map((agent) => (
+                            {agentOptions.map((agent) => (
                               <option key={agent}>{agent}</option>
                             ))}
                           </select>
@@ -3459,7 +3404,7 @@ export function OpenclawDashboard() {
                             }
                             className="h-9 w-full rounded-md border bg-background px-2 text-sm"
                           >
-                            {agentNames.map((agent) => (
+                            {agentOptions.map((agent) => (
                               <option key={agent}>{agent}</option>
                             ))}
                           </select>
@@ -3606,6 +3551,9 @@ export function OpenclawDashboard() {
                 </CardHeader>
                 <CardContent className="space-y-3">
                   <div className="flex flex-wrap gap-2">
+                    {agents.length === 0 && (
+                      <p className="text-xs text-muted-foreground">No agents available. Sync the gateway first.</p>
+                    )}
                     {agents.map((agent) => (
                       <Button
                         key={agent.name}
@@ -3648,34 +3596,17 @@ export function OpenclawDashboard() {
                   <CardHeader>
                     <CardTitle>OpenClaw Gateway</CardTitle>
                     <CardDescription>
-                      Connect through backend WebSocket RPC. Pair this dashboard device on OpenClaw if prompted.
+                      Managed by AgenticOS backend service configuration.
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-3">
-                    <div className="grid gap-2 md:grid-cols-3">
-                      <Input
-                        value={gatewayUrl}
-                        onChange={(event) => setGatewayUrl(event.target.value)}
-                        placeholder="wss://your-gateway.example/ws"
-                      />
-                      <Input
-                        value={gatewayToken}
-                        onChange={(event) => setGatewayToken(event.target.value)}
-                        placeholder="Gateway token (preferred)"
-                        type="password"
-                      />
-                      <Input
-                        value={gatewayPassword}
-                        onChange={(event) => setGatewayPassword(event.target.value)}
-                        placeholder="Gateway password (optional)"
-                        type="password"
-                      />
-                    </div>
                     <div className="flex flex-wrap items-center gap-2">
                       <Button onClick={() => void syncGatewayBootstrap()} disabled={gatewayLoading}>
-                        {gatewayLoading ? "Connecting..." : "Connect / Refresh"}
+                        {gatewayLoading ? "Syncing..." : "Sync Gateway"}
                       </Button>
                       <Badge variant={gatewayConnected ? "secondary" : "outline"}>{gatewayConnected ? "Connected" : "Disconnected"}</Badge>
+                      <Badge variant="outline">Transport: CLI</Badge>
+                      <Badge variant="outline">Target: {gatewayTarget}</Badge>
                       <span className="text-xs text-muted-foreground">{gatewayStatus}</span>
                     </div>
                   </CardContent>
@@ -3685,7 +3616,7 @@ export function OpenclawDashboard() {
                   <Card>
                     <CardHeader>
                       <CardTitle>Agents</CardTitle>
-                      <CardDescription>Loaded from gateway config (`config.get`).</CardDescription>
+                      <CardDescription>Loaded from configured OpenClaw service sources.</CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-2">
                       <div className="grid gap-2 md:grid-cols-3">

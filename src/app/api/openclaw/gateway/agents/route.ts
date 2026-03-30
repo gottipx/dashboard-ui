@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { readFile } from "node:fs/promises";
 
 import { callGateway } from "@/lib/openclaw/gateway-call";
 import { runOpenclawCliJson } from "@/lib/openclaw/cli";
@@ -138,17 +139,29 @@ function computeStateFromLogs(logs: string[]): RuntimeAgent["state"] {
   return "ready";
 }
 
-function enrichAgentsWithRuntime(agents: RuntimeAgent[], sessionsPayload?: unknown): RuntimeAgent[] {
+function pickLogLinesForAgent(source: string[], agent: RuntimeAgent) {
+  const idNeedle = agent.id?.trim().toLowerCase() ?? "";
+  const nameNeedle = agent.name?.trim().toLowerCase() ?? "";
+  if (!idNeedle && !nameNeedle) return [] as string[];
+  return source.filter((line) => {
+    const lower = line.toLowerCase();
+    return (idNeedle && lower.includes(idNeedle)) || (nameNeedle && lower.includes(nameNeedle));
+  });
+}
+
+function enrichAgentsWithRuntime(agents: RuntimeAgent[], sessionsPayload?: unknown, logTail: string[] = []): RuntimeAgent[] {
   const sessionItems = sessionsPayload ? extractSessionItems(sessionsPayload) : [];
   const sessionsByAgent = indexSessionsByAgent(sessionItems);
   return agents.map((agent) => {
     const idKey = agent.id?.trim().toLowerCase() ?? "";
     const nameKey = agent.name?.trim().toLowerCase() ?? "";
-    const logs = [...(sessionsByAgent.get(idKey) ?? []), ...(sessionsByAgent.get(nameKey) ?? [])].slice(0, 25);
+    const sessionLogs = [...(sessionsByAgent.get(idKey) ?? []), ...(sessionsByAgent.get(nameKey) ?? [])];
+    const fileLogs = pickLogLinesForAgent(logTail, agent);
+    const logs = [...sessionLogs, ...fileLogs].slice(-25);
     const state = agent.state ?? computeStateFromLogs(logs);
     const info =
       agent.info ??
-      (agent.workspace ? `Workspace: ${agent.workspace}` : logs.length > 0 ? `${logs.length} runtime entries` : "Connected via gateway");
+      (agent.workspace ? `Workspace: ${agent.workspace}` : logs.length > 0 ? `${logs.length} runtime entries` : "Connected via OpenClaw");
     return {
       ...agent,
       state,
@@ -171,6 +184,44 @@ async function callSessionsList(url: string | undefined, auth: { token?: string;
     } catch {
       return null;
     }
+  }
+}
+
+function extractFirstLogPath(payload: unknown): string | undefined {
+  const stack: unknown[] = [payload];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) continue;
+    if (typeof current === "string") {
+      const looksLikeLog = current.includes(".log") && (current.includes("/tmp/") || current.includes("/var/") || current.includes("/home/"));
+      if (looksLikeLog) return current;
+      continue;
+    }
+    if (Array.isArray(current)) {
+      for (const item of current) stack.push(item);
+      continue;
+    }
+    if (typeof current === "object") {
+      const obj = current as Record<string, unknown>;
+      for (const value of Object.values(obj)) stack.push(value);
+    }
+  }
+  return undefined;
+}
+
+async function loadGatewayLogTail() {
+  try {
+    const statusPayload = await runOpenclawCliJson(["status", "--json"], 10000);
+    const logPath = extractFirstLogPath(statusPayload);
+    if (!logPath) return [] as string[];
+    const content = await readFile(logPath, "utf8");
+    return content
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(-400);
+  } catch {
+    return [] as string[];
   }
 }
 
@@ -287,6 +338,7 @@ export async function POST(request: Request) {
 
     if (body.action === "list" || !body.action) {
       const sessionsPayload = await callSessionsList(gatewayUrl, auth);
+      const logTail = await loadGatewayLogTail();
 
       try {
         const cfgPayload = await callGateway({ url: gatewayUrl, auth, method: "config.get", params: {}, timeoutMs: 10000 });
@@ -308,7 +360,7 @@ export async function POST(request: Request) {
               default: Boolean(row.default),
             };
           });
-          return NextResponse.json({ ok: true, agents: enrichAgentsWithRuntime(normalized, sessionsPayload), source: "config.get" });
+          return NextResponse.json({ ok: true, agents: enrichAgentsWithRuntime(normalized, sessionsPayload, logTail), source: "config.get" });
         }
       } catch {
         // continue with fallbacks below
@@ -330,7 +382,7 @@ export async function POST(request: Request) {
         if (agents.length > 0) {
           return NextResponse.json({
             ok: true,
-            agents: enrichAgentsWithRuntime(agents, sessionsPayload),
+            agents: enrichAgentsWithRuntime(agents, sessionsPayload, logTail),
             source: "node.list",
             warning: "config.get had no agents; using node.list.",
           });
@@ -372,7 +424,7 @@ export async function POST(request: Request) {
         if (agents.length > 0) {
           return NextResponse.json({
             ok: true,
-            agents: enrichAgentsWithRuntime(agents, sessionsPayload),
+            agents: enrichAgentsWithRuntime(agents, sessionsPayload, logTail),
             source: "nodes.status",
             warning: "config.get/node.list had no agents; using nodes status.",
           });
@@ -423,7 +475,7 @@ export async function POST(request: Request) {
         if (cliAgents.length > 0) {
           return NextResponse.json({
             ok: true,
-            agents: enrichAgentsWithRuntime(cliAgents, sessionsPayload),
+            agents: enrichAgentsWithRuntime(cliAgents, sessionsPayload, logTail),
             source: "cli.fallback",
             warning: "Using CLI fallback source for agent inventory.",
           });
@@ -439,7 +491,7 @@ export async function POST(request: Request) {
       }
       return NextResponse.json({
         ok: true,
-        agents: enrichAgentsWithRuntime(agents, sessionsPayload),
+        agents: enrichAgentsWithRuntime(agents, sessionsPayload, logTail),
         source: "system-presence",
         warning: "config.get/node.list/nodes.status had no agents; showing presence entries.",
       });

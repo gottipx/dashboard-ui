@@ -10,6 +10,7 @@ type Body = {
   token?: string;
   password?: string;
   action?: "read" | "write";
+  agentId?: string;
   path?: string;
   content?: string;
   readMethod?: string;
@@ -33,7 +34,12 @@ export async function POST(request: Request) {
         url: runtime.url,
         auth,
         method: readMethod,
-        params: { path: body.path },
+        params: {
+          path: body.path,
+          agentId: body.agentId,
+          agent: body.agentId,
+          nodeId: body.agentId,
+        },
       });
       return NextResponse.json({ ok: true, payload });
     }
@@ -42,7 +48,13 @@ export async function POST(request: Request) {
       url: runtime.url,
       auth,
       method: writeMethod,
-      params: { path: body.path, content: body.content ?? "" },
+      params: {
+        path: body.path,
+        content: body.content ?? "",
+        agentId: body.agentId,
+        agent: body.agentId,
+        nodeId: body.agentId,
+      },
     });
     return NextResponse.json({ ok: true, payload });
   } catch (error) {

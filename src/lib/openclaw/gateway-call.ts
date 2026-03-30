@@ -1,8 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { openclawRpc } from "@/lib/openclaw/gateway-rpc";
-
 const execFileAsync = promisify(execFile);
 
 type Auth = {
@@ -108,6 +106,7 @@ export async function callGateway(options: CallOptions): Promise<unknown> {
   }
 
   if (mode === "ws") {
+    const { openclawRpc } = await import("@/lib/openclaw/gateway-rpc");
     if (!options.url?.trim()) {
       throw new Error("Gateway URL is required for ws transport.");
     }
@@ -122,6 +121,7 @@ export async function callGateway(options: CallOptions): Promise<unknown> {
   }
 
   try {
+    const { openclawRpc } = await import("@/lib/openclaw/gateway-rpc");
     if (!options.url?.trim()) {
       throw new Error("Gateway URL is required for ws transport.");
     }

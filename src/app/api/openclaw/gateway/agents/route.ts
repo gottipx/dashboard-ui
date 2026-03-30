@@ -18,15 +18,42 @@ type Body = {
   };
 };
 
+type RuntimeAgent = {
+  id?: string;
+  name?: string;
+  workspace?: string;
+  default?: boolean;
+  state?: "ready" | "running" | "down";
+  info?: string;
+  logs?: string[];
+};
+
+function asObject(input: unknown): Record<string, unknown> {
+  return input && typeof input === "object" ? (input as Record<string, unknown>) : {};
+}
+
 function parseAgents(configPayload: unknown) {
-  const payload = (configPayload ?? {}) as Record<string, unknown>;
-  const config = (payload.config ?? payload.value ?? payload) as Record<string, unknown>;
-  const agents = (config.agents ?? {}) as Record<string, unknown>;
+  const payload = asObject(configPayload);
+  const value = asObject(payload.value);
+  const configNode = asObject(payload.config);
+  const config = asObject(configNode.config ?? value.config ?? payload.config ?? payload.value ?? payload);
+  const agents = asObject(config.agents);
   const list = Array.isArray(agents.list) ? agents.list : [];
-  return {
-    list,
-    hash: typeof payload.hash === "string" ? payload.hash : undefined,
-  };
+  const meta = asObject(payload.meta);
+  const context = asObject(payload.context);
+  const hashCandidates = [
+    payload.hash,
+    payload.baseHash,
+    payload.configHash,
+    meta.hash,
+    context.hash,
+    configNode.hash,
+    value.hash,
+    config.hash,
+    agents.hash,
+  ];
+  const hash = hashCandidates.find((value) => typeof value === "string") as string | undefined;
+  return { list, hash };
 }
 
 function extractArray(payload: Record<string, unknown>, keys: string[]) {
@@ -44,6 +71,147 @@ function extractArray(payload: Record<string, unknown>, keys: string[]) {
   return [] as unknown[];
 }
 
+function extractSessionItems(sessionsPayload: unknown): Record<string, unknown>[] {
+  const payload = asObject(sessionsPayload);
+  const items = Array.isArray(payload.items)
+    ? payload.items
+    : Array.isArray(payload.sessions)
+      ? payload.sessions
+      : Array.isArray(sessionsPayload)
+        ? (sessionsPayload as unknown[])
+        : [];
+  return items.map((entry) => asObject(entry));
+}
+
+function toIsoTime(value: unknown) {
+  if (typeof value !== "string" || !value.trim()) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toISOString().slice(11, 19);
+}
+
+function sessionLine(row: Record<string, unknown>) {
+  const timestamp =
+    toIsoTime(row.updatedAt ?? row.updated_at ?? row.lastSeenAt ?? row.last_seen_at ?? row.createdAt ?? row.created_at) || "runtime";
+  const state = String(row.state ?? row.status ?? row.phase ?? "active");
+  const key = String(row.key ?? row.id ?? row.sessionId ?? row.session_id ?? "session");
+  return `${timestamp} ${state} (${key})`;
+}
+
+function indexSessionsByAgent(items: Record<string, unknown>[]) {
+  const bucket = new Map<string, string[]>();
+  const push = (key: string, line: string) => {
+    const normalized = key.trim().toLowerCase();
+    if (!normalized) return;
+    const current = bucket.get(normalized) ?? [];
+    current.push(line);
+    bucket.set(normalized, current);
+  };
+
+  for (const row of items) {
+    const line = sessionLine(row);
+    const candidates = [
+      row.agent,
+      row.agentId,
+      row.agent_id,
+      row.nodeId,
+      row.node_id,
+      row.owner,
+      row.assignee,
+      row.name,
+    ]
+      .filter((value) => typeof value === "string")
+      .map((value) => String(value));
+    for (const key of candidates) {
+      push(key, line);
+    }
+  }
+  return bucket;
+}
+
+function computeStateFromLogs(logs: string[]): RuntimeAgent["state"] {
+  if (logs.length === 0) return "ready";
+  const joined = logs.join(" ").toLowerCase();
+  if (joined.includes("down") || joined.includes("failed") || joined.includes("error")) return "down";
+  if (joined.includes("run") || joined.includes("active") || joined.includes("progress") || joined.includes("busy")) return "running";
+  return "ready";
+}
+
+function enrichAgentsWithRuntime(agents: RuntimeAgent[], sessionsPayload?: unknown): RuntimeAgent[] {
+  const sessionItems = sessionsPayload ? extractSessionItems(sessionsPayload) : [];
+  const sessionsByAgent = indexSessionsByAgent(sessionItems);
+  return agents.map((agent) => {
+    const idKey = agent.id?.trim().toLowerCase() ?? "";
+    const nameKey = agent.name?.trim().toLowerCase() ?? "";
+    const logs = [...(sessionsByAgent.get(idKey) ?? []), ...(sessionsByAgent.get(nameKey) ?? [])].slice(0, 25);
+    const state = agent.state ?? computeStateFromLogs(logs);
+    const info =
+      agent.info ??
+      (agent.workspace ? `Workspace: ${agent.workspace}` : logs.length > 0 ? `${logs.length} runtime entries` : "Connected via gateway");
+    return {
+      ...agent,
+      state,
+      info,
+      logs,
+    };
+  });
+}
+
+async function callSessionsList(url: string, auth: { token?: string; password?: string }) {
+  try {
+    return await callGateway({ url, auth, method: "sessions.list", params: {}, timeoutMs: 10000 });
+  } catch {
+    try {
+      const args = ["gateway", "call", "sessions.list", "--params", "{}", "--url", url];
+      if (auth.token) args.push("--token", auth.token);
+      if (auth.password) args.push("--password", auth.password);
+      return await runOpenclawCliJson(args, 12000);
+    } catch {
+      return null;
+    }
+  }
+}
+
+function isHashError(message: string) {
+  const text = message.toLowerCase();
+  return text.includes("base hash required") || text.includes("hash mismatch") || text.includes("re-run config.get");
+}
+
+async function patchAgentsWithRetry(args: {
+  url: string;
+  auth: { token?: string; password?: string };
+  nextList: unknown[];
+  baseHash?: string;
+}) {
+  const patchPayload: Record<string, unknown> = {
+    raw: JSON.stringify({ agents: { list: args.nextList } }),
+  };
+  if (args.baseHash) patchPayload.baseHash = args.baseHash;
+  try {
+    return await callGateway({
+      url: args.url,
+      auth: args.auth,
+      method: "config.patch",
+      params: patchPayload,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!isHashError(message)) throw error;
+    const refreshed = await callGateway({ url: args.url, auth: args.auth, method: "config.get", params: {}, timeoutMs: 10000 });
+    const parsed = parseAgents(refreshed);
+    const retryPayload: Record<string, unknown> = {
+      raw: JSON.stringify({ agents: { list: args.nextList } }),
+    };
+    if (parsed.hash) retryPayload.baseHash = parsed.hash;
+    return await callGateway({
+      url: args.url,
+      auth: args.auth,
+      method: "config.patch",
+      params: retryPayload,
+    });
+  }
+}
+
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as Body;
@@ -54,11 +222,29 @@ export async function POST(request: Request) {
     const auth = { token: body.token, password: body.password };
 
     if (body.action === "list" || !body.action) {
+      const sessionsPayload = await callSessionsList(body.url, auth);
+
       try {
         const cfgPayload = await callGateway({ url: body.url, auth, method: "config.get", params: {}, timeoutMs: 10000 });
         const cfg = parseAgents(cfgPayload);
         if (cfg.list.length > 0) {
-          return NextResponse.json({ ok: true, agents: cfg.list, source: "config.get" });
+          const normalized: RuntimeAgent[] = cfg.list.map((entry) => {
+            const row = asObject(entry);
+            return {
+              id: typeof row.id === "string" ? row.id : undefined,
+              name:
+                typeof row.name === "string"
+                  ? row.name
+                  : typeof row.label === "string"
+                    ? row.label
+                    : typeof row.id === "string"
+                      ? row.id
+                      : undefined,
+              workspace: typeof row.workspace === "string" ? row.workspace : undefined,
+              default: Boolean(row.default),
+            };
+          });
+          return NextResponse.json({ ok: true, agents: enrichAgentsWithRuntime(normalized, sessionsPayload), source: "config.get" });
         }
       } catch {
         // continue with fallbacks below
@@ -80,7 +266,7 @@ export async function POST(request: Request) {
         if (agents.length > 0) {
           return NextResponse.json({
             ok: true,
-            agents,
+            agents: enrichAgentsWithRuntime(agents, sessionsPayload),
             source: "node.list",
             warning: "config.get had no agents; using node.list.",
           });
@@ -122,7 +308,7 @@ export async function POST(request: Request) {
         if (agents.length > 0) {
           return NextResponse.json({
             ok: true,
-            agents,
+            agents: enrichAgentsWithRuntime(agents, sessionsPayload),
             source: "nodes.status",
             warning: "config.get/node.list had no agents; using nodes status.",
           });
@@ -141,37 +327,36 @@ export async function POST(request: Request) {
       });
       const payload = (presencePayload ?? {}) as Record<string, unknown>;
       const items = extractArray(payload, ["items", "devices", "peers", "nodes", "presence"]);
-      const agents = items
-        .map((entry, idx) => {
-          const row = entry as Record<string, unknown>;
-          const roles = Array.isArray(row.roles) ? row.roles.map(String) : [];
-          if (roles.length > 0 && !roles.includes("node") && !roles.includes("agent") && !roles.includes("worker")) return null;
-          return {
-            id:
-              typeof row.deviceId === "string"
-                ? row.deviceId
-                : typeof row.id === "string"
-                  ? row.id
-                  : typeof row.nodeId === "string"
-                    ? row.nodeId
-                    : `presence-${idx + 1}`,
-            name:
-              typeof row.name === "string"
-                ? row.name
-                : typeof row.label === "string"
-                  ? row.label
-                  : typeof row.title === "string"
-                    ? row.title
+      const agents: RuntimeAgent[] = [];
+      for (const [idx, entry] of items.entries()) {
+        const row = entry as Record<string, unknown>;
+        const roles = Array.isArray(row.roles) ? row.roles.map(String) : [];
+        if (roles.length > 0 && !roles.includes("node") && !roles.includes("agent") && !roles.includes("worker")) continue;
+        agents.push({
+          id:
+            typeof row.deviceId === "string"
+              ? row.deviceId
+              : typeof row.id === "string"
+                ? row.id
+                : typeof row.nodeId === "string"
+                  ? row.nodeId
+                  : `presence-${idx + 1}`,
+          name:
+            typeof row.name === "string"
+              ? row.name
+              : typeof row.label === "string"
+                ? row.label
+                : typeof row.title === "string"
+                  ? row.title
                   : typeof row.deviceId === "string"
                     ? row.deviceId
                     : "Gateway Presence",
-            workspace: undefined,
-          };
-        })
-        .filter(Boolean);
+          workspace: undefined,
+        });
+      }
       return NextResponse.json({
         ok: true,
-        agents,
+        agents: enrichAgentsWithRuntime(agents, sessionsPayload),
         source: "system-presence",
         warning: "config.get/node.list/nodes.status had no agents; showing presence entries.",
       });
@@ -202,16 +387,11 @@ export async function POST(request: Request) {
         default: Boolean(body.agent?.default),
       };
       const nextList = [...cfg.list, nextAgent];
-      const patchPayload: Record<string, unknown> = {
-        raw: JSON.stringify({ agents: { list: nextList } }),
-      };
-      if (cfg.hash) patchPayload.baseHash = cfg.hash;
-
-      const patchResult = await callGateway({
+      const patchResult = await patchAgentsWithRetry({
         url: body.url,
         auth,
-        method: "config.patch",
-        params: patchPayload,
+        nextList,
+        baseHash: cfg.hash,
       });
 
       return NextResponse.json({ ok: true, agent: nextAgent, patch: patchResult });

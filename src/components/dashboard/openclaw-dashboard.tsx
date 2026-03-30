@@ -187,6 +187,9 @@ type GatewayAgentEntry = {
   name?: string;
   workspace?: string;
   default?: boolean;
+  state?: "ready" | "running" | "down";
+  info?: string;
+  logs?: string[];
 };
 
 type GatewaySessionEntry = {
@@ -1118,7 +1121,7 @@ export function OpenclawDashboard() {
           tagIds: row.tag_ids ?? [],
         }))
       );
-      setAgents(initialAgentProfiles);
+      setAgents((prev) => (prev.length > 0 ? prev : initialAgentProfiles));
       setCalendarEvents(
         eventRows.map((row) => ({
           id: row.id,
@@ -2175,6 +2178,12 @@ export function OpenclawDashboard() {
                     : undefined,
             workspace: typeof row.workspace === "string" ? row.workspace : undefined,
             default: Boolean(row.default),
+            state:
+              row.state === "running" || row.state === "down" || row.state === "ready"
+                ? (row.state as "ready" | "running" | "down")
+                : undefined,
+            info: typeof row.info === "string" ? row.info : undefined,
+            logs: Array.isArray(row.logs) ? row.logs.map((item) => String(item)) : undefined,
           };
         });
       if (mapped.length > 0) {
@@ -2182,9 +2191,9 @@ export function OpenclawDashboard() {
         setAgents(
           mapped.map((agent) => ({
             name: agent.name || agent.id || "gateway-agent",
-            state: "ready",
-            info: agent.workspace ? `Workspace: ${agent.workspace}` : "Connected via gateway",
-            logs: [],
+            state: agent.state ?? "ready",
+            info: agent.info ?? (agent.workspace ? `Workspace: ${agent.workspace}` : "Connected via gateway"),
+            logs: agent.logs ?? [],
           }))
         );
         setSelectedAgentName(mapped[0].name || mapped[0].id || "gateway-agent");
@@ -2288,6 +2297,12 @@ export function OpenclawDashboard() {
       setDashboardNotice({ type: "error", message: error instanceof Error ? error.message : "Document save failed" });
     }
   };
+
+  useEffect(() => {
+    if (!userId || !gatewayUrl.trim()) return;
+    void syncGatewayBootstrap();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId, gatewayUrl]);
 
   const signIn = async () => {
     if (!email || !password) return;

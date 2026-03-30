@@ -199,6 +199,13 @@ type GatewaySessionEntry = {
   state?: string;
 };
 
+type GatewayFileEntry = {
+  path: string;
+  name: string;
+  type: "file" | "directory";
+  size?: number;
+};
+
 const AUTH_ENABLED = true;
 const ISSUE_TYPES: IssueType[] = ["Bug", "Story", "Task", "Epic", "Spike", "Incident", "Improvement", "Chore"];
 const PRIORITIES: Priority[] = ["Highest", "High", "Medium", "Low", "Lowest"];
@@ -792,6 +799,9 @@ export function OpenclawDashboard() {
   const [gatewayDocContent, setGatewayDocContent] = useState("");
   const [gatewayDocReadMethod, setGatewayDocReadMethod] = useState("workspace.read");
   const [gatewayDocWriteMethod, setGatewayDocWriteMethod] = useState("workspace.write");
+  const [gatewayWorkspacePath, setGatewayWorkspacePath] = useState(".");
+  const [gatewayFiles, setGatewayFiles] = useState<GatewayFileEntry[]>([]);
+  const [gatewayFilesLoading, setGatewayFilesLoading] = useState(false);
   const [gatewaySelectedAgent, setGatewaySelectedAgent] = useState("");
   const [gatewayChatMessage, setGatewayChatMessage] = useState("");
   const [gatewayChatResult, setGatewayChatResult] = useState("");
@@ -2215,6 +2225,7 @@ export function OpenclawDashboard() {
       setGatewayConnected(true);
       await loadGatewayAgents();
       await loadGatewaySessions();
+      await loadGatewayFiles(".");
       setDashboardNotice({ type: "success", message: "Gateway connected and synced." });
     } catch (error) {
       setGatewayConnected(false);
@@ -2329,6 +2340,39 @@ export function OpenclawDashboard() {
     }
   };
 
+  const loadGatewayFiles = async (pathOverride?: string) => {
+    const path = (pathOverride ?? gatewayWorkspacePath).trim() || ".";
+    setGatewayFilesLoading(true);
+    try {
+      const result = await gatewayApi<{ entries?: GatewayFileEntry[]; path?: string }>("/api/openclaw/gateway/files", {
+        action: "list",
+        agentId: gatewaySelectedAgent || undefined,
+        path,
+      });
+      setGatewayWorkspacePath(result.path || path);
+      setGatewayFiles((result.entries ?? []) as GatewayFileEntry[]);
+    } catch (error) {
+      setDashboardNotice({ type: "error", message: error instanceof Error ? error.message : "Loading files failed" });
+    } finally {
+      setGatewayFilesLoading(false);
+    }
+  };
+
+  const openGatewayFile = async (path: string) => {
+    try {
+      const result = await gatewayApi<{ content?: string }>("/api/openclaw/gateway/files", {
+        action: "read",
+        agentId: gatewaySelectedAgent || undefined,
+        path,
+      });
+      setGatewayDocPath(path);
+      setGatewayDocContent(result.content ?? "");
+      setDashboardNotice({ type: "success", message: `Loaded ${path}.` });
+    } catch (error) {
+      setDashboardNotice({ type: "error", message: error instanceof Error ? error.message : "File read failed" });
+    }
+  };
+
   const createGatewayAgent = async () => {
     if (!gatewayAgentId.trim() || !gatewayAgentName.trim()) {
       setDashboardNotice({ type: "error", message: "Agent id and agent name are required." });
@@ -2360,20 +2404,12 @@ export function OpenclawDashboard() {
       return;
     }
     try {
-      const result = await gatewayApi<{ payload: unknown }>("/api/openclaw/gateway/docs", {
+      const result = await gatewayApi<{ content?: string }>("/api/openclaw/gateway/files", {
         action: "read",
         path: gatewayDocPath.trim(),
         agentId: gatewaySelectedAgent || undefined,
-        readMethod: gatewayDocReadMethod.trim() || "workspace.read",
       });
-      const payload = result.payload as Record<string, unknown>;
-      const content =
-        typeof payload?.content === "string"
-          ? payload.content
-          : typeof payload?.text === "string"
-            ? payload.text
-            : JSON.stringify(result.payload, null, 2);
-      setGatewayDocContent(content);
+      setGatewayDocContent(result.content ?? "");
       setDashboardNotice({ type: "success", message: `Loaded ${gatewayDocPath.trim()}.` });
     } catch (error) {
       setDashboardNotice({ type: "error", message: error instanceof Error ? error.message : "Document read failed" });
@@ -2386,12 +2422,11 @@ export function OpenclawDashboard() {
       return;
     }
     try {
-      await gatewayApi<{ payload: unknown }>("/api/openclaw/gateway/docs", {
+      await gatewayApi<{ payload: unknown }>("/api/openclaw/gateway/files", {
         action: "write",
         path: gatewayDocPath.trim(),
         agentId: gatewaySelectedAgent || undefined,
         content: gatewayDocContent,
-        writeMethod: gatewayDocWriteMethod.trim() || "workspace.write",
       });
       setDashboardNotice({ type: "success", message: `Saved ${gatewayDocPath.trim()}.` });
     } catch (error) {
@@ -2402,6 +2437,10 @@ export function OpenclawDashboard() {
   useEffect(() => {
     if (!userId) return;
     void syncGatewayBootstrap();
+    const timer = window.setInterval(() => {
+      void syncGatewayBootstrap();
+    }, 30000);
+    return () => window.clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
 
@@ -2409,6 +2448,7 @@ export function OpenclawDashboard() {
     if (!gatewayConnected) return;
     if (!gatewaySelectedAgent.trim()) return;
     void loadGatewaySessions(gatewaySelectedAgent);
+    void loadGatewayFiles(".");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gatewayConnected, gatewaySelectedAgent]);
 
@@ -3779,14 +3819,12 @@ export function OpenclawDashboard() {
                   <CardHeader>
                     <CardTitle>OpenClaw Gateway</CardTitle>
                     <CardDescription>
-                      Managed by AgenticOS backend service configuration.
+                      Always-on managed connection from AgenticOS backend service configuration.
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-3">
                     <div className="flex flex-wrap items-center gap-2">
-                      <Button onClick={() => void syncGatewayBootstrap()} disabled={gatewayLoading}>
-                        {gatewayLoading ? "Syncing..." : "Sync Gateway"}
-                      </Button>
+                      <Badge variant={gatewayLoading ? "outline" : "secondary"}>{gatewayLoading ? "Syncing" : "Auto-sync active"}</Badge>
                       <Badge variant={gatewayConnected ? "secondary" : "outline"}>{gatewayConnected ? "Connected" : "Disconnected"}</Badge>
                       <Badge variant="outline">Transport: CLI</Badge>
                       <Badge variant="outline">Target: {gatewayTarget}</Badge>
@@ -3872,31 +3910,99 @@ export function OpenclawDashboard() {
                   <CardHeader>
                     <CardTitle>Agent Files</CardTitle>
                     <CardDescription>
-                      Open and edit key markdown files such as `SOUL.md` and `MEMORY.md`.
+                      Browse and edit workspace files (`identity.md`, `tools.md`, `agents.md`, `heartbeat.md`, `memory/*`, and more).
                     </CardDescription>
                   </CardHeader>
-                  <CardContent className="space-y-2">
-                    <div className="grid gap-2 md:grid-cols-3">
-                      <Input value={gatewayDocPath} onChange={(event) => setGatewayDocPath(event.target.value)} placeholder="SOUL.md or MEMORY.md" />
-                      <Button type="button" variant="outline" onClick={() => setGatewayDocPath("SOUL.md")}>
+                  <CardContent className="space-y-3">
+                    <div className="flex flex-wrap gap-2">
+                      <Input
+                        value={gatewayWorkspacePath}
+                        onChange={(event) => setGatewayWorkspacePath(event.target.value)}
+                        placeholder="Workspace path (.)"
+                        className="max-w-sm"
+                      />
+                      <Button variant="outline" onClick={() => void loadGatewayFiles(gatewayWorkspacePath)} disabled={gatewayFilesLoading}>
+                        {gatewayFilesLoading ? "Loading..." : "Open Folder"}
+                      </Button>
+                      <Button type="button" variant="outline" onClick={() => void openGatewayFile("SOUL.md")}>
                         SOUL.md
                       </Button>
-                      <Button type="button" variant="outline" onClick={() => setGatewayDocPath("MEMORY.md")}>
+                      <Button type="button" variant="outline" onClick={() => void openGatewayFile("MEMORY.md")}>
                         MEMORY.md
                       </Button>
-                    </div>
-                    <div className="flex gap-2">
-                      <Button variant="outline" onClick={() => void readGatewayDoc()}>
-                        Read Document
+                      <Button type="button" variant="outline" onClick={() => void openGatewayFile("AGENTS.md")}>
+                        AGENTS.md
                       </Button>
-                      <Button onClick={() => void saveGatewayDoc()}>Save Document</Button>
+                      <Button type="button" variant="outline" onClick={() => void openGatewayFile("BOOTSTRAP.md")}>
+                        BOOTSTRAP.md
+                      </Button>
+                      <Button type="button" variant="outline" onClick={() => void openGatewayFile("HEARTBEAT.md")}>
+                        HEARTBEAT.md
+                      </Button>
+                      <Button type="button" variant="outline" onClick={() => void openGatewayFile("IDENTITY.md")}>
+                        IDENTITY.md
+                      </Button>
+                      <Button type="button" variant="outline" onClick={() => void openGatewayFile("TOOLS.md")}>
+                        TOOLS.md
+                      </Button>
+                      <Button type="button" variant="outline" onClick={() => void openGatewayFile("USER.md")}>
+                        USER.md
+                      </Button>
                     </div>
-                    <Textarea
-                      value={gatewayDocContent}
-                      onChange={(event) => setGatewayDocContent(event.target.value)}
-                      className="min-h-[220px] font-mono text-xs"
-                      placeholder="Document content..."
-                    />
+
+                    <div className="grid gap-3 lg:grid-cols-[320px_1fr]">
+                      <div className="space-y-2">
+                        <p className="text-xs text-muted-foreground">Folder: {gatewayWorkspacePath}</p>
+                        <ScrollArea className="h-[340px] rounded-lg border p-2">
+                          <div className="space-y-1">
+                            {gatewayFiles.length === 0 && (
+                              <p className="px-1 py-1 text-xs text-muted-foreground">No entries found in this folder.</p>
+                            )}
+                            {gatewayFiles.map((entry) => (
+                              <button
+                                key={entry.path}
+                                type="button"
+                                className={cn(
+                                  "flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs transition",
+                                  gatewayDocPath === entry.path ? "bg-primary/10" : "hover:bg-muted/40"
+                                )}
+                                onClick={() => {
+                                  if (entry.type === "directory") {
+                                    void loadGatewayFiles(entry.path);
+                                  } else {
+                                    void openGatewayFile(entry.path);
+                                  }
+                                }}
+                              >
+                                <span className="truncate">{entry.type === "directory" ? "[DIR]" : "[FILE]"} {entry.name}</span>
+                                <span className="text-muted-foreground">{entry.type === "directory" ? "dir" : "file"}</span>
+                              </button>
+                            ))}
+                          </div>
+                        </ScrollArea>
+                      </div>
+
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <Input
+                            value={gatewayDocPath}
+                            onChange={(event) => setGatewayDocPath(event.target.value)}
+                            placeholder="Selected file path"
+                            className="font-mono text-xs"
+                          />
+                          <Button variant="outline" onClick={() => void readGatewayDoc()}>
+                            Reload File
+                          </Button>
+                          <Button onClick={() => void saveGatewayDoc()}>Save File</Button>
+                        </div>
+                        <Textarea
+                          value={gatewayDocContent}
+                          onChange={(event) => setGatewayDocContent(event.target.value)}
+                          className="min-h-[340px] font-mono text-xs"
+                          placeholder="File content..."
+                        />
+                      </div>
+                    </div>
                   </CardContent>
                 </Card>
 

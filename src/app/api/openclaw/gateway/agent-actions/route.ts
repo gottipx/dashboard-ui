@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { callGateway } from "@/lib/openclaw/gateway-call";
+import { runOpenclawCliJson } from "@/lib/openclaw/cli";
 import { resolveGatewayRuntime } from "@/lib/openclaw/runtime-config";
 
 export const runtime = "nodejs";
@@ -34,6 +35,28 @@ function extractSessions(payload: unknown) {
         ? payload
         : [];
   return items.map((entry) => asObject(entry));
+}
+
+async function sessionsFromCli(args: { url?: string; token?: string; password?: string }) {
+  const base = [] as string[];
+  if (args.url?.trim()) base.push("--url", args.url.trim());
+  if (args.token) base.push("--token", args.token);
+  if (args.password) base.push("--password", args.password);
+  const attempts: string[][] = [
+    ["gateway", "call", "sessions.list", "--params", "{}", ...base],
+    ["sessions", "list", "--json"],
+    ["session", "list", "--json"],
+  ];
+  for (const cmd of attempts) {
+    try {
+      const payload = await runOpenclawCliJson(cmd, 12000);
+      const rows = extractSessions(payload);
+      if (rows.length > 0) return rows;
+    } catch {
+      // continue fallback probing
+    }
+  }
+  return [] as Record<string, unknown>[];
 }
 
 function includesAgent(row: Record<string, unknown>, agentId: string) {
@@ -90,8 +113,13 @@ export async function POST(request: Request) {
     const url = runtime.url;
 
     if (body.action === "sessions") {
-      const payload = await callGateway({ url, auth, method: "sessions.list", params: {}, timeoutMs: 12000 });
-      const sessions = extractSessions(payload);
+      let sessions: Record<string, unknown>[] = [];
+      try {
+        const payload = await callGateway({ url, auth, method: "sessions.list", params: {}, timeoutMs: 12000 });
+        sessions = extractSessions(payload);
+      } catch {
+        sessions = await sessionsFromCli({ url, token: auth.token, password: auth.password });
+      }
       const filtered = body.agentId?.trim()
         ? sessions.filter((row) => includesAgent(row, body.agentId!))
         : sessions;
@@ -161,4 +189,3 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: false, error: message }, { status: 500 });
   }
 }
-

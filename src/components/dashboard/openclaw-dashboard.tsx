@@ -197,6 +197,8 @@ type GatewaySessionEntry = {
   id?: string;
   key?: string;
   state?: string;
+  agent?: string;
+  updatedAt?: string;
 };
 
 type GatewayFileEntry = {
@@ -813,6 +815,7 @@ export function OpenclawDashboard() {
   const [gatewayAgentId, setGatewayAgentId] = useState("");
   const [gatewayAgentName, setGatewayAgentName] = useState("");
   const [gatewayAgentWorkspace, setGatewayAgentWorkspace] = useState("");
+  const [createAgentDialogOpen, setCreateAgentDialogOpen] = useState(false);
   const [gatewayDocPath, setGatewayDocPath] = useState("SOUL.md");
   const [gatewayDocContent, setGatewayDocContent] = useState("");
   const [gatewayWorkspacePath, setGatewayWorkspacePath] = useState(".");
@@ -1794,7 +1797,7 @@ export function OpenclawDashboard() {
     () =>
       gatewayAgents.map((agent) => ({
         value: agent.id || agent.name || "",
-        label: `${agent.name || agent.id || "Unnamed"}${agent.workspace ? ` (${agent.workspace})` : ""}`,
+        label: `${agent.name || agent.id || "Unnamed"}`,
       })),
     [gatewayAgents]
   );
@@ -2342,6 +2345,22 @@ export function OpenclawDashboard() {
               : typeof row.status === "string"
                 ? row.status
                 : undefined,
+          agent:
+            typeof row.agent === "string"
+              ? row.agent
+              : typeof row.agentId === "string"
+                ? row.agentId
+                : typeof row.nodeId === "string"
+                  ? row.nodeId
+                  : undefined,
+          updatedAt:
+            typeof row.updatedAt === "string"
+              ? row.updatedAt
+              : typeof row.updated_at === "string"
+                ? row.updated_at
+                : typeof row.createdAt === "string"
+                  ? row.createdAt
+                  : undefined,
         } satisfies GatewaySessionEntry;
       });
       setGatewaySessions(mapped);
@@ -2428,6 +2447,7 @@ export function OpenclawDashboard() {
       setGatewayAgentId("");
       setGatewayAgentName("");
       setGatewayAgentWorkspace("");
+      setCreateAgentDialogOpen(false);
       await loadGatewayAgents();
       setDashboardNotice({ type: "success", message: "OpenClaw agent created." });
     } catch (error) {
@@ -3936,7 +3956,7 @@ export function OpenclawDashboard() {
                   <Card>
                     <CardHeader>
                       <CardTitle>Agents</CardTitle>
-                      <CardDescription>Loaded from configured OpenClaw service sources.</CardDescription>
+                      <CardDescription>Select an agent to inspect sessions, logs, chat, and files.</CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-2">
                       <div className="space-y-1">
@@ -3945,27 +3965,23 @@ export function OpenclawDashboard() {
                           {gatewayAgentOptions.length === 0 && (
                             <p className="text-xs text-muted-foreground">No agents loaded.</p>
                           )}
-                          {gatewayAgentOptions.map((agent) => (
+                          {gatewayAgents.map((agent) => {
+                            const value = agent.id || agent.name || "";
+                            const runtime = agents.find((entry) => entry.id === value || entry.name === (agent.name || value));
+                            return (
                             <Button
-                              key={agent.value}
+                              key={value}
                               type="button"
-                              variant={gatewaySelectedAgent === agent.value ? "default" : "outline"}
-                              onClick={() => setGatewaySelectedAgent(agent.value)}
-                              className="h-8"
+                              variant={gatewaySelectedAgent === value ? "default" : "outline"}
+                              onClick={() => setGatewaySelectedAgent(value)}
+                              className="h-8 gap-2"
                             >
-                              {agent.label}
+                              <StatusLed state={runtime?.state ?? "ready"} />
+                              {agent.name || agent.id || "Unnamed"}
                             </Button>
-                          ))}
+                            );
+                          })}
                         </div>
-                      </div>
-                      <div className="grid gap-2 md:grid-cols-3">
-                        <Input value={gatewayAgentId} onChange={(event) => setGatewayAgentId(event.target.value)} placeholder="Agent id" />
-                        <Input value={gatewayAgentName} onChange={(event) => setGatewayAgentName(event.target.value)} placeholder="Agent name" />
-                        <Input
-                          value={gatewayAgentWorkspace}
-                          onChange={(event) => setGatewayAgentWorkspace(event.target.value)}
-                          placeholder="Workspace path (optional)"
-                        />
                       </div>
                       <div className="flex gap-2">
                         <Button variant="outline" onClick={() => void loadGatewayAgents()}>
@@ -3974,18 +3990,33 @@ export function OpenclawDashboard() {
                         <Button variant="outline" onClick={() => void loadGatewaySessions(gatewaySelectedAgent, sessionsScope)}>
                           Reload Sessions
                         </Button>
-                        <Button onClick={() => void createGatewayAgent()}>Create Agent</Button>
-                      </div>
-                      <div className="space-y-1 text-sm">
-                        {gatewayAgents.length === 0 && <p className="text-muted-foreground">No agents loaded yet.</p>}
-                        {gatewayAgents.map((agent) => (
-                          <div key={`${agent.id}-${agent.name}`} className="rounded-md border p-2">
-                            <p className="font-medium">{agent.name || agent.id || "Unnamed agent"}</p>
-                            <p className="text-xs text-muted-foreground">
-                              {agent.id || "no-id"} {agent.workspace ? `• ${agent.workspace}` : ""}
-                            </p>
-                          </div>
-                        ))}
+                        <Dialog open={createAgentDialogOpen} onOpenChange={setCreateAgentDialogOpen}>
+                          <Button onClick={() => setCreateAgentDialogOpen(true)}>Create Agent</Button>
+                          <DialogContent className="sm:max-w-lg">
+                            <DialogHeader>
+                              <DialogTitle>Create OpenClaw Agent</DialogTitle>
+                              <DialogDescription>Add a new agent with id, name, and optional workspace path.</DialogDescription>
+                            </DialogHeader>
+                            <div className="grid gap-2">
+                              <label className="text-xs font-medium">Agent ID</label>
+                              <Input value={gatewayAgentId} onChange={(event) => setGatewayAgentId(event.target.value)} placeholder="main" />
+                              <label className="text-xs font-medium">Agent Name</label>
+                              <Input value={gatewayAgentName} onChange={(event) => setGatewayAgentName(event.target.value)} placeholder="Main Agent" />
+                              <label className="text-xs font-medium">Workspace (optional)</label>
+                              <Input
+                                value={gatewayAgentWorkspace}
+                                onChange={(event) => setGatewayAgentWorkspace(event.target.value)}
+                                placeholder="/home/openclaw/.openclaw/agents/main"
+                              />
+                            </div>
+                            <DialogFooter>
+                              <Button variant="outline" onClick={() => setCreateAgentDialogOpen(false)}>
+                                Cancel
+                              </Button>
+                              <Button onClick={() => void createGatewayAgent()}>Create</Button>
+                            </DialogFooter>
+                          </DialogContent>
+                        </Dialog>
                       </div>
                     </CardContent>
                   </Card>
@@ -4018,7 +4049,11 @@ export function OpenclawDashboard() {
                           {gatewaySessions.map((session, idx) => (
                             <div key={`${session.id || session.key || idx}`} className="rounded-md border p-2">
                               <p className="font-medium">{session.key || session.id || "Session"}</p>
-                              <p className="text-xs text-muted-foreground">{session.state || "unknown state"}</p>
+                              <p className="text-xs text-muted-foreground">
+                                {session.state || "unknown state"}
+                                {session.agent ? ` • ${session.agent}` : ""}
+                                {session.updatedAt ? ` • ${session.updatedAt}` : ""}
+                              </p>
                             </div>
                           ))}
                         </div>
@@ -4051,7 +4086,7 @@ export function OpenclawDashboard() {
                   <CardHeader>
                     <CardTitle>Agent Files</CardTitle>
                     <CardDescription>
-                      Browse and edit workspace files (`identity.md`, `tools.md`, `agents.md`, `heartbeat.md`, `memory/*`, and more).
+                      Workspace tree for selected agent.
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-3">
@@ -4064,30 +4099,6 @@ export function OpenclawDashboard() {
                       />
                       <Button variant="outline" onClick={() => void loadGatewayFiles(gatewayWorkspacePath)} disabled={gatewayFilesLoading}>
                         {gatewayFilesLoading ? "Loading..." : "Open Folder"}
-                      </Button>
-                      <Button type="button" variant="outline" onClick={() => void openGatewayFile("SOUL.md")}>
-                        SOUL.md
-                      </Button>
-                      <Button type="button" variant="outline" onClick={() => void openGatewayFile("MEMORY.md")}>
-                        MEMORY.md
-                      </Button>
-                      <Button type="button" variant="outline" onClick={() => void openGatewayFile("AGENTS.md")}>
-                        AGENTS.md
-                      </Button>
-                      <Button type="button" variant="outline" onClick={() => void openGatewayFile("BOOTSTRAP.md")}>
-                        BOOTSTRAP.md
-                      </Button>
-                      <Button type="button" variant="outline" onClick={() => void openGatewayFile("HEARTBEAT.md")}>
-                        HEARTBEAT.md
-                      </Button>
-                      <Button type="button" variant="outline" onClick={() => void openGatewayFile("IDENTITY.md")}>
-                        IDENTITY.md
-                      </Button>
-                      <Button type="button" variant="outline" onClick={() => void openGatewayFile("TOOLS.md")}>
-                        TOOLS.md
-                      </Button>
-                      <Button type="button" variant="outline" onClick={() => void openGatewayFile("USER.md")}>
-                        USER.md
                       </Button>
                     </div>
 

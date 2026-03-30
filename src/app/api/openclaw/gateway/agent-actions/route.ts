@@ -30,6 +30,8 @@ function extractSessions(payload: unknown) {
     ? source.items
     : Array.isArray(source.sessions)
       ? source.sessions
+      : Array.isArray(source.entries)
+        ? source.entries
       : Array.isArray(payload)
         ? payload
         : [];
@@ -88,16 +90,17 @@ export async function POST(request: Request) {
     if (body.action === "sessions") {
       const gatewayResult = await firstSuccessfulGatewayCallOptional(["sessions.list", "session.list"], {});
       const cliResult = await firstSuccessfulCliOptional([
-        ["sessions", "list", "--json"],
+        ["sessions", "--all-agents", "--json"],
+        ["sessions", "--json"],
         ["session", "list", "--json"],
       ]);
-      const payload = gatewayResult.payload ?? cliResult.payload;
+      const payload = cliResult.payload ?? gatewayResult.payload;
       const sessions = payload ? extractSessions(payload) : [];
       const filtered = body.agentId?.trim() ? sessions.filter((row) => includesAgent(row, body.agentId!)) : sessions;
       return NextResponse.json({
         ok: true,
         sessions: filtered,
-        source: gatewayResult.payload ? gatewayResult.source : cliResult.source,
+        source: cliResult.payload ? cliResult.source : gatewayResult.source,
         warning:
           !gatewayResult.payload && !cliResult.payload
             ? `Sessions unavailable via CLI/gateway-call. ${gatewayResult.error || ""} ${cliResult.error || ""}`.trim()
@@ -110,6 +113,13 @@ export async function POST(request: Request) {
       const agentId = body.agentId?.trim();
       if (!message || !agentId) {
         return NextResponse.json({ error: "Agent and message are required." }, { status: 400 });
+      }
+      const cliResult = await firstSuccessfulCliOptional([
+        ["agent", "--agent", agentId, "--message", message, "--json"],
+        ["agent", "--agent", agentId, "--message", message],
+      ]);
+      if (cliResult.payload) {
+        return NextResponse.json({ ok: true, payload: cliResult.payload, source: cliResult.source });
       }
       const result = await firstSuccessfulGatewayCall(
         ["agent.chat", "agent.message", "session.message", "chat.send", "assistant.message"],

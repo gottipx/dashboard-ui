@@ -57,15 +57,37 @@ async function firstSuccessfulCli(attempts: string[][]) {
   throw new Error(`No supported OpenClaw CLI command succeeded. Tried: ${errors.join(" | ")}`);
 }
 
+async function firstSuccessfulCliOptional(attempts: string[][]) {
+  const errors: string[] = [];
+  for (const args of attempts) {
+    try {
+      return { payload: await runOpenclawCliJson(args, 45000), source: args.join(" "), error: undefined as string | undefined };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      errors.push(`${args.join(" ")}: ${message.split("\n")[0]}`);
+    }
+  }
+  return { payload: null, source: "none", error: errors.join(" | ") };
+}
+
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as Body;
 
     if (body.action === "sessions") {
-      const result = await firstSuccessfulCli([["sessions", "list", "--json"], ["session", "list", "--json"]]);
-      const sessions = extractSessions(result.payload);
+      const result = await firstSuccessfulCliOptional([
+        ["sessions", "list", "--json"],
+        ["session", "list", "--json"],
+        ["status", "--json"],
+      ]);
+      const sessions = result.payload ? extractSessions(result.payload) : [];
       const filtered = body.agentId?.trim() ? sessions.filter((row) => includesAgent(row, body.agentId!)) : sessions;
-      return NextResponse.json({ ok: true, sessions: filtered, source: result.source });
+      return NextResponse.json({
+        ok: true,
+        sessions: filtered,
+        source: result.source,
+        warning: result.error && filtered.length === 0 ? `Sessions unavailable via CLI. ${result.error}` : undefined,
+      });
     }
 
     if (body.action === "chat") {
@@ -104,4 +126,3 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: false, error: message }, { status: 500 });
   }
 }
-

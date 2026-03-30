@@ -210,6 +210,7 @@ type OpenclawLogsResponse = {
   logs?: string[];
   source?: string;
   warning?: string;
+  range?: "all" | "12h";
 };
 
 const AUTH_ENABLED = true;
@@ -811,6 +812,7 @@ export function OpenclawDashboard() {
   const [gatewayChatResult, setGatewayChatResult] = useState("");
   const [gatewayActionLoading, setGatewayActionLoading] = useState(false);
   const [openclawLogSource, setOpenclawLogSource] = useState<string>("");
+  const [logRange, setLogRange] = useState<"all" | "12h">("all");
   const [autoDispatchTasks, setAutoDispatchTasks] = useState(true);
 
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -1784,6 +1786,18 @@ export function OpenclawDashboard() {
       })),
     [gatewayAgents]
   );
+  const workspaceBreadcrumbs = useMemo(() => {
+    const normalized = gatewayWorkspacePath.trim() === "" ? "." : gatewayWorkspacePath.trim();
+    if (normalized === ".") return [{ label: ".", path: "." }];
+    const parts = normalized.split("/").filter(Boolean);
+    const crumbs = [{ label: ".", path: "." }];
+    let current = "";
+    for (const part of parts) {
+      current = current ? `${current}/${part}` : part;
+      crumbs.push({ label: part, path: current });
+    }
+    return crumbs;
+  }, [gatewayWorkspacePath]);
   const tagById = useMemo(() => new Map(tags.map((tag) => [tag.id, tag])), [tags]);
   const selectedAgent = agents.find((agent) => agent.name === selectedAgentName) ?? agents[0];
   const isSidebarExpanded = isSidebarPinned || isSidebarOpenedByButton;
@@ -2209,7 +2223,7 @@ export function OpenclawDashboard() {
       await loadGatewayAgents();
       await loadGatewaySessions();
       await loadGatewayFiles(".");
-      await loadAgentLogs();
+      await loadAgentLogs(undefined, logRange);
       setDashboardNotice({ type: "success", message: "OpenClaw CLI synced." });
     } catch (error) {
       setGatewayConnected(false);
@@ -2291,7 +2305,7 @@ export function OpenclawDashboard() {
 
   const loadGatewaySessions = async (agentId?: string) => {
     try {
-      const result = await runAgentAction<{ sessions?: unknown[] }>({
+      const result = await runAgentAction<{ sessions?: unknown[]; warning?: string }>({
         action: "sessions",
         agentId: agentId?.trim() || undefined,
       });
@@ -2319,16 +2333,20 @@ export function OpenclawDashboard() {
         } satisfies GatewaySessionEntry;
       });
       setGatewaySessions(mapped);
+      if (result.warning) {
+        setGatewayStatus(result.warning);
+      }
     } catch (error) {
       setDashboardNotice({ type: "error", message: error instanceof Error ? error.message : "Loading sessions failed" });
     }
   };
 
-  const loadAgentLogs = async (agentId?: string) => {
+  const loadAgentLogs = async (agentId?: string, range: "all" | "12h" = logRange) => {
     try {
       const result = await gatewayApi<OpenclawLogsResponse>("/api/openclaw/gateway/logs", {
         agentId: agentId?.trim() || undefined,
         limit: 500,
+        range,
       });
       const lines = (result.logs ?? []).map((line) => String(line));
       setOpenclawLogSource(result.source ?? "");
@@ -2452,9 +2470,9 @@ export function OpenclawDashboard() {
     if (!gatewaySelectedAgent.trim()) return;
     void loadGatewaySessions(gatewaySelectedAgent);
     void loadGatewayFiles(".");
-    void loadAgentLogs(gatewaySelectedAgent);
+    void loadAgentLogs(gatewaySelectedAgent, logRange);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gatewayConnected, gatewaySelectedAgent]);
+  }, [gatewayConnected, gatewaySelectedAgent, logRange]);
 
   const signIn = async () => {
     if (!email || !password) return;
@@ -3775,7 +3793,7 @@ export function OpenclawDashboard() {
                   <CardDescription>Select an agent and inspect the OpenClaw CLI log stream</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3">
-                  <div className="flex flex-wrap gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     {agents.length === 0 && (
                       <p className="text-xs text-muted-foreground">No agents available yet. Open the OpenClaw tab and wait for auto-sync.</p>
                     )}
@@ -3791,6 +3809,31 @@ export function OpenclawDashboard() {
                         {agent.name}
                       </Button>
                     ))}
+                    <Separator orientation="vertical" className="mx-1 h-6" />
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={logRange === "12h" ? "default" : "outline"}
+                      onClick={() => setLogRange("12h")}
+                    >
+                      Last 12h
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={logRange === "all" ? "default" : "outline"}
+                      onClick={() => setLogRange("all")}
+                    >
+                      All
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void loadAgentLogs(selectedAgent?.id || selectedAgent?.name, logRange)}
+                    >
+                      Reload Logs
+                    </Button>
                   </div>
                   <ScrollArea className="h-56 rounded-lg border bg-zinc-950 p-3 text-xs text-zinc-200">
                     <div className="space-y-2 font-mono">
@@ -3848,18 +3891,22 @@ export function OpenclawDashboard() {
                     <CardContent className="space-y-2">
                       <div className="space-y-1">
                         <label className="text-xs font-medium">Active Agent Context</label>
-                        <select
-                          value={gatewaySelectedAgent}
-                          onChange={(event) => setGatewaySelectedAgent(event.target.value)}
-                          className="h-9 w-full rounded-md border bg-background px-2 text-sm"
-                        >
-                          {gatewayAgentOptions.length === 0 && <option value="">No agents loaded</option>}
+                        <div className="flex flex-wrap gap-2">
+                          {gatewayAgentOptions.length === 0 && (
+                            <p className="text-xs text-muted-foreground">No agents loaded.</p>
+                          )}
                           {gatewayAgentOptions.map((agent) => (
-                            <option key={agent.value} value={agent.value}>
+                            <Button
+                              key={agent.value}
+                              type="button"
+                              variant={gatewaySelectedAgent === agent.value ? "default" : "outline"}
+                              onClick={() => setGatewaySelectedAgent(agent.value)}
+                              className="h-8"
+                            >
                               {agent.label}
-                            </option>
+                            </Button>
                           ))}
-                        </select>
+                        </div>
                       </div>
                       <div className="grid gap-2 md:grid-cols-3">
                         <Input value={gatewayAgentId} onChange={(event) => setGatewayAgentId(event.target.value)} placeholder="Agent id" />
@@ -3958,7 +4005,20 @@ export function OpenclawDashboard() {
 
                     <div className="grid gap-3 lg:grid-cols-[320px_1fr]">
                       <div className="space-y-2">
-                        <p className="text-xs text-muted-foreground">Folder: {gatewayWorkspacePath}</p>
+                        <div className="flex flex-wrap items-center gap-1 text-xs">
+                          {workspaceBreadcrumbs.map((crumb, idx) => (
+                            <span key={crumb.path} className="inline-flex items-center gap-1">
+                              {idx > 0 && <span className="text-muted-foreground">/</span>}
+                              <button
+                                type="button"
+                                className="rounded px-1 py-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                                onClick={() => void loadGatewayFiles(crumb.path)}
+                              >
+                                {crumb.label}
+                              </button>
+                            </span>
+                          ))}
+                        </div>
                         <ScrollArea className="h-[340px] rounded-lg border p-2">
                           <div className="space-y-1">
                             {gatewayFiles.length === 0 && (

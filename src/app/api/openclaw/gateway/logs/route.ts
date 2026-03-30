@@ -9,6 +9,7 @@ export const runtime = "nodejs";
 type Body = {
   agentId?: string;
   limit?: number;
+  range?: "all" | "12h";
 };
 
 function extractFirstLogPath(payload: unknown): string | undefined {
@@ -78,6 +79,22 @@ async function resolveLogPath() {
   return undefined;
 }
 
+function parseLineTimestamp(line: string): number | null {
+  const isoMatch = line.match(/\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?/);
+  if (isoMatch) {
+    const date = new Date(isoMatch[0].replace(" ", "T"));
+    if (!Number.isNaN(date.getTime())) return date.getTime();
+  }
+  const hmsMatch = line.match(/(^|\s)(\d{2}):(\d{2}):(\d{2})(\s|$)/);
+  if (hmsMatch) {
+    const now = new Date();
+    const candidate = new Date(now);
+    candidate.setHours(Number(hmsMatch[2]), Number(hmsMatch[3]), Number(hmsMatch[4]), 0);
+    return candidate.getTime();
+  }
+  return null;
+}
+
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as Body;
@@ -93,11 +110,23 @@ export async function POST(request: Request) {
       .map((line) => line.trim())
       .filter(Boolean);
     const filtered = agentId ? lines.filter((line) => line.toLowerCase().includes(agentId)) : lines;
-    const useLines = (filtered.length > 0 ? filtered : lines).slice(-limit);
+    const base = filtered.length > 0 ? filtered : lines;
+    const range = body.range === "12h" ? "12h" : "all";
+    const now = Date.now();
+    const rangeFiltered =
+      range === "12h"
+        ? base.filter((line) => {
+            const ts = parseLineTimestamp(line);
+            if (!ts) return false;
+            return now - ts <= 12 * 60 * 60 * 1000;
+          })
+        : base;
+    const useLines = (rangeFiltered.length > 0 ? rangeFiltered : base).slice(-limit);
     return NextResponse.json({
       ok: true,
       logs: useLines,
       source: logPath,
+      range,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "OpenClaw logs failed";

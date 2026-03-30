@@ -1,8 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { callGateway } from "@/lib/openclaw/gateway-call";
 import { runOpenclawCliJson } from "@/lib/openclaw/cli";
-import { resolveGatewayRuntime } from "@/lib/openclaw/runtime-config";
 
 export const runtime = "nodejs";
 
@@ -37,118 +35,51 @@ function extractSessions(payload: unknown) {
   return items.map((entry) => asObject(entry));
 }
 
-async function sessionsFromCli(args: { url?: string; token?: string; password?: string }) {
-  const base = [] as string[];
-  if (args.url?.trim()) base.push("--url", args.url.trim());
-  if (args.token) base.push("--token", args.token);
-  if (args.password) base.push("--password", args.password);
-  const attempts: string[][] = [
-    ["gateway", "call", "sessions.list", "--params", "{}", ...base],
-    ["sessions", "list", "--json"],
-    ["session", "list", "--json"],
-  ];
-  for (const cmd of attempts) {
-    try {
-      const payload = await runOpenclawCliJson(cmd, 12000);
-      const rows = extractSessions(payload);
-      if (rows.length > 0) return rows;
-    } catch {
-      // continue fallback probing
-    }
-  }
-  return [] as Record<string, unknown>[];
-}
-
 function includesAgent(row: Record<string, unknown>, agentId: string) {
   const needle = agentId.trim().toLowerCase();
   if (!needle) return true;
-  const candidates = [
-    row.agent,
-    row.agentId,
-    row.agent_id,
-    row.nodeId,
-    row.node_id,
-    row.owner,
-    row.assignee,
-    row.name,
-    row.id,
-    row.key,
-  ]
+  const candidates = [row.agent, row.agentId, row.agent_id, row.nodeId, row.node_id, row.owner, row.assignee, row.name, row.id, row.key]
     .filter((value) => typeof value === "string")
     .map((value) => String(value).toLowerCase());
   return candidates.some((value) => value.includes(needle));
 }
 
-async function tryMethods(args: {
-  url?: string;
-  auth: { token?: string; password?: string };
-  methods: string[];
-  payloadBuilder: (method: string) => Record<string, unknown>;
-  timeoutMs?: number;
-}) {
+async function firstSuccessfulCli(attempts: string[][]) {
   const errors: string[] = [];
-  for (const method of args.methods) {
+  for (const args of attempts) {
     try {
-      const payload = await callGateway({
-        url: args.url,
-        auth: args.auth,
-        method,
-        params: args.payloadBuilder(method),
-        timeoutMs: args.timeoutMs ?? 20000,
-      });
-      return { method, payload };
+      return { payload: await runOpenclawCliJson(args, 45000), source: args.join(" ") };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      errors.push(`${method}: ${message.split("\n")[0]}`);
+      errors.push(`${args.join(" ")}: ${message.split("\n")[0]}`);
     }
   }
-  throw new Error(`No supported gateway method succeeded. Tried: ${errors.join(" | ")}`);
+  throw new Error(`No supported OpenClaw CLI command succeeded. Tried: ${errors.join(" | ")}`);
 }
 
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as Body;
-    const runtime = resolveGatewayRuntime({});
-    const auth = runtime.auth;
-    const url = runtime.url;
 
     if (body.action === "sessions") {
-      let sessions: Record<string, unknown>[] = [];
-      try {
-        const payload = await callGateway({ url, auth, method: "sessions.list", params: {}, timeoutMs: 12000 });
-        sessions = extractSessions(payload);
-      } catch {
-        sessions = await sessionsFromCli({ url, token: auth.token, password: auth.password });
-      }
-      const filtered = body.agentId?.trim()
-        ? sessions.filter((row) => includesAgent(row, body.agentId!))
-        : sessions;
-      return NextResponse.json({ ok: true, sessions: filtered });
+      const result = await firstSuccessfulCli([["sessions", "list", "--json"], ["session", "list", "--json"]]);
+      const sessions = extractSessions(result.payload);
+      const filtered = body.agentId?.trim() ? sessions.filter((row) => includesAgent(row, body.agentId!)) : sessions;
+      return NextResponse.json({ ok: true, sessions: filtered, source: result.source });
     }
 
     if (body.action === "chat") {
       const message = body.message?.trim();
-      if (!message) {
-        return NextResponse.json({ error: "Message is required." }, { status: 400 });
+      const agentId = body.agentId?.trim();
+      if (!message || !agentId) {
+        return NextResponse.json({ error: "Agent and message are required." }, { status: 400 });
       }
-      const agentId = body.agentId?.trim() || undefined;
-      const result = await tryMethods({
-        url,
-        auth,
-        methods: ["agent.chat", "agent.message", "chat.send", "session.message", "assistant.message"],
-        payloadBuilder: () => ({
-          agentId,
-          agent: agentId,
-          nodeId: agentId,
-          id: agentId,
-          message,
-          text: message,
-          prompt: message,
-          input: message,
-        }),
-        timeoutMs: 45000,
-      });
-      return NextResponse.json({ ok: true, method: result.method, payload: result.payload });
+      const result = await firstSuccessfulCli([
+        ["agent", "chat", "--id", agentId, "--message", message, "--json"],
+        ["agents", "chat", "--id", agentId, "--message", message, "--json"],
+        ["chat", "--agent", agentId, "--message", message, "--json"],
+      ]);
+      return NextResponse.json({ ok: true, payload: result.payload, source: result.source });
     }
 
     if (body.action === "dispatch-task") {
@@ -158,34 +89,19 @@ export async function POST(request: Request) {
       if (!agentId || !title) {
         return NextResponse.json({ error: "Task title and target agent are required." }, { status: 400 });
       }
-      const result = await tryMethods({
-        url,
-        auth,
-        methods: ["task.create", "tasks.create", "agent.task", "agent.assign", "work.enqueue"],
-        payloadBuilder: () => ({
-          agentId,
-          agent: agentId,
-          nodeId: agentId,
-          task: {
-            id: task.id,
-            title,
-            description: task.description || "",
-            project: task.project || "",
-            priority: task.priority || "Medium",
-            status: task.status || "Todo",
-          },
-          title,
-          description: task.description || "",
-          project: task.project || "",
-          priority: task.priority || "Medium",
-        }),
-      });
-      return NextResponse.json({ ok: true, method: result.method, payload: result.payload });
+      const description = task.description || "";
+      const result = await firstSuccessfulCli([
+        ["tasks", "create", "--agent", agentId, "--title", title, "--description", description, "--json"],
+        ["task", "create", "--agent", agentId, "--title", title, "--description", description, "--json"],
+        ["agent", "task", "--id", agentId, "--title", title, "--description", description, "--json"],
+      ]);
+      return NextResponse.json({ ok: true, payload: result.payload, source: result.source });
     }
 
     return NextResponse.json({ error: "Unsupported action." }, { status: 400 });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Agent actions failed";
+    const message = error instanceof Error ? error.message : "Agent actions CLI failed";
     return NextResponse.json({ ok: false, error: message }, { status: 500 });
   }
 }
+

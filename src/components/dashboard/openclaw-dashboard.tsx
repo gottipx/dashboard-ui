@@ -206,6 +206,12 @@ type GatewayFileEntry = {
   size?: number;
 };
 
+type OpenclawLogsResponse = {
+  logs?: string[];
+  source?: string;
+  warning?: string;
+};
+
 const AUTH_ENABLED = true;
 const ISSUE_TYPES: IssueType[] = ["Bug", "Story", "Task", "Epic", "Spike", "Incident", "Improvement", "Chore"];
 const PRIORITIES: Priority[] = ["Highest", "High", "Medium", "Low", "Lowest"];
@@ -219,7 +225,7 @@ const navItems: NavItem[] = [
   { id: "metrics", label: "Statistics", icon: Activity },
   { id: "logs", label: "Agent Logs", icon: TerminalSquare },
   { id: "calendar", label: "Calendar", icon: CalendarClock },
-  { id: "gateway", label: "Gateway", icon: Wifi },
+  { id: "gateway", label: "OpenClaw", icon: Wifi },
 ];
 
 const weekDayLabels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -797,8 +803,6 @@ export function OpenclawDashboard() {
   const [gatewayAgentWorkspace, setGatewayAgentWorkspace] = useState("");
   const [gatewayDocPath, setGatewayDocPath] = useState("SOUL.md");
   const [gatewayDocContent, setGatewayDocContent] = useState("");
-  const [gatewayDocReadMethod, setGatewayDocReadMethod] = useState("workspace.read");
-  const [gatewayDocWriteMethod, setGatewayDocWriteMethod] = useState("workspace.write");
   const [gatewayWorkspacePath, setGatewayWorkspacePath] = useState(".");
   const [gatewayFiles, setGatewayFiles] = useState<GatewayFileEntry[]>([]);
   const [gatewayFilesLoading, setGatewayFilesLoading] = useState(false);
@@ -806,6 +810,7 @@ export function OpenclawDashboard() {
   const [gatewayChatMessage, setGatewayChatMessage] = useState("");
   const [gatewayChatResult, setGatewayChatResult] = useState("");
   const [gatewayActionLoading, setGatewayActionLoading] = useState(false);
+  const [openclawLogSource, setOpenclawLogSource] = useState<string>("");
   const [autoDispatchTasks, setAutoDispatchTasks] = useState(true);
 
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -898,28 +903,6 @@ export function OpenclawDashboard() {
   useEffect(() => {
     document.documentElement.classList.toggle("dark", darkMode);
   }, [darkMode]);
-
-  useEffect(() => {
-    const raw = window.localStorage.getItem("agenticos.gateway.settings");
-    if (!raw) return;
-    try {
-      const parsed = JSON.parse(raw) as { readMethod?: string; writeMethod?: string };
-      setGatewayDocReadMethod(parsed.readMethod ?? "workspace.read");
-      setGatewayDocWriteMethod(parsed.writeMethod ?? "workspace.write");
-    } catch {
-      // ignore malformed local settings
-    }
-  }, []);
-
-  useEffect(() => {
-    window.localStorage.setItem(
-      "agenticos.gateway.settings",
-      JSON.stringify({
-        readMethod: gatewayDocReadMethod,
-        writeMethod: gatewayDocWriteMethod,
-      })
-    );
-  }, [gatewayDocReadMethod, gatewayDocWriteMethod]);
 
   useEffect(() => {
     if (!userId) return;
@@ -1747,7 +1730,7 @@ export function OpenclawDashboard() {
       {
         label: "Open Sessions",
         value: `${gatewaySessions.length}`,
-        detail: gatewayConnected ? "Gateway live sessions" : "Service sessions",
+        detail: gatewayConnected ? "OpenClaw CLI sessions" : "Service sessions",
       },
       { label: "Board Cards", value: `${totalCards}`, detail: `${completionRate}% done` },
       { label: "Issues", value: `${issues.length}`, detail: "Synced into board flow" },
@@ -2080,7 +2063,7 @@ export function OpenclawDashboard() {
     });
     const json = (await response.json()) as { ok?: boolean; error?: string } & T;
     if (!response.ok || json.ok === false) {
-      throw new Error(json.error || "Gateway request failed");
+      throw new Error(json.error || "OpenClaw request failed");
     }
     return json as T;
   };
@@ -2193,7 +2176,7 @@ export function OpenclawDashboard() {
           id: String(row.id ?? row.nodeId ?? row.name ?? `node-${idx + 1}`),
           name: String(row.id ?? row.name ?? row.nodeId ?? `node-${idx + 1}`),
           state: !healthy ? "down" : running ? "running" : "ready",
-          info: String(row.label ?? row.state ?? row.health ?? "Gateway node"),
+          info: String(row.label ?? row.state ?? row.health ?? "OpenClaw node"),
           logs: [],
         };
       });
@@ -2226,11 +2209,12 @@ export function OpenclawDashboard() {
       await loadGatewayAgents();
       await loadGatewaySessions();
       await loadGatewayFiles(".");
-      setDashboardNotice({ type: "success", message: "Gateway connected and synced." });
+      await loadAgentLogs();
+      setDashboardNotice({ type: "success", message: "OpenClaw CLI synced." });
     } catch (error) {
       setGatewayConnected(false);
-      setGatewayStatus(error instanceof Error ? error.message : "Gateway connection failed");
-      setDashboardNotice({ type: "error", message: error instanceof Error ? error.message : "Gateway connection failed" });
+      setGatewayStatus(error instanceof Error ? error.message : "OpenClaw CLI connection failed");
+      setDashboardNotice({ type: "error", message: error instanceof Error ? error.message : "OpenClaw CLI connection failed" });
     } finally {
       setGatewayLoading(false);
     }
@@ -2340,6 +2324,29 @@ export function OpenclawDashboard() {
     }
   };
 
+  const loadAgentLogs = async (agentId?: string) => {
+    try {
+      const result = await gatewayApi<OpenclawLogsResponse>("/api/openclaw/gateway/logs", {
+        agentId: agentId?.trim() || undefined,
+        limit: 500,
+      });
+      const lines = (result.logs ?? []).map((line) => String(line));
+      setOpenclawLogSource(result.source ?? "");
+      if (lines.length === 0) return;
+      setAgents((prev) =>
+        prev.map((agent) => {
+          if (agentId && agent.name !== agentId && agent.id !== agentId) return agent;
+          return {
+            ...agent,
+            logs: lines,
+          };
+        })
+      );
+    } catch (error) {
+      setDashboardNotice({ type: "error", message: error instanceof Error ? error.message : "Loading logs failed" });
+    }
+  };
+
   const loadGatewayFiles = async (pathOverride?: string) => {
     const path = (pathOverride ?? gatewayWorkspacePath).trim() || ".";
     setGatewayFilesLoading(true);
@@ -2392,7 +2399,7 @@ export function OpenclawDashboard() {
       setGatewayAgentName("");
       setGatewayAgentWorkspace("");
       await loadGatewayAgents();
-      setDashboardNotice({ type: "success", message: "Gateway agent created." });
+      setDashboardNotice({ type: "success", message: "OpenClaw agent created." });
     } catch (error) {
       setDashboardNotice({ type: "error", message: error instanceof Error ? error.message : "Agent creation failed" });
     }
@@ -2437,10 +2444,6 @@ export function OpenclawDashboard() {
   useEffect(() => {
     if (!userId) return;
     void syncGatewayBootstrap();
-    const timer = window.setInterval(() => {
-      void syncGatewayBootstrap();
-    }, 30000);
-    return () => window.clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
 
@@ -2449,6 +2452,7 @@ export function OpenclawDashboard() {
     if (!gatewaySelectedAgent.trim()) return;
     void loadGatewaySessions(gatewaySelectedAgent);
     void loadGatewayFiles(".");
+    void loadAgentLogs(gatewaySelectedAgent);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gatewayConnected, gatewaySelectedAgent]);
 
@@ -2967,9 +2971,10 @@ export function OpenclawDashboard() {
               <TabsTrigger value="projects">Projects</TabsTrigger>
               <TabsTrigger value="issues">Issues</TabsTrigger>
               <TabsTrigger value="metrics">Statistics</TabsTrigger>
+              <TabsTrigger value="agents">Agents</TabsTrigger>
               <TabsTrigger value="logs">Agent Logs</TabsTrigger>
               <TabsTrigger value="calendar">Calendar</TabsTrigger>
-              <TabsTrigger value="gateway">Gateway</TabsTrigger>
+              <TabsTrigger value="gateway">OpenClaw</TabsTrigger>
             </TabsList>
 
             <Dialog open={issueDialogOpen} onOpenChange={setIssueDialogOpen}>
@@ -3130,7 +3135,7 @@ export function OpenclawDashboard() {
                   <CardContent className="space-y-2">
                     {agents.length === 0 && (
                       <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
-                        No agents discovered yet. Open the Gateway tab and run Sync Gateway.
+                        No agents discovered yet. Open the OpenClaw tab and wait for auto-sync.
                       </p>
                     )}
                     {agents.map((agent) => (
@@ -3767,12 +3772,12 @@ export function OpenclawDashboard() {
               <Card>
                 <CardHeader>
                   <CardTitle>Agent Logs</CardTitle>
-                  <CardDescription>Select an agent and inspect its log stream</CardDescription>
+                  <CardDescription>Select an agent and inspect the OpenClaw CLI log stream</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3">
                   <div className="flex flex-wrap gap-2">
                     {agents.length === 0 && (
-                      <p className="text-xs text-muted-foreground">No agents available. Sync the gateway first.</p>
+                      <p className="text-xs text-muted-foreground">No agents available yet. Open the OpenClaw tab and wait for auto-sync.</p>
                     )}
                     {agents.map((agent) => (
                       <Button
@@ -3789,8 +3794,9 @@ export function OpenclawDashboard() {
                   </div>
                   <ScrollArea className="h-56 rounded-lg border bg-zinc-950 p-3 text-xs text-zinc-200">
                     <div className="space-y-2 font-mono">
+                      {openclawLogSource && <p className="text-zinc-400">Source: {openclawLogSource}</p>}
                       {(selectedAgent?.logs?.length ?? 0) === 0 && (
-                        <p className="text-zinc-400">No agent-specific log lines returned yet. Trigger activity and sync again.</p>
+                        <p className="text-zinc-400">No agent-specific lines matched; showing global OpenClaw logs when available.</p>
                       )}
                       {(selectedAgent?.logs ?? []).map((line, idx) => (
                         <p key={`${selectedAgent?.name}-${idx}`}>{line}</p>
@@ -3813,18 +3819,18 @@ export function OpenclawDashboard() {
               />
             </TabsContent>
 
-            <TabsContent value="gateway" className="mt-0">
+            <TabsContent value="agents" className="mt-0">
               <div className="space-y-3">
                 <Card>
                   <CardHeader>
-                    <CardTitle>OpenClaw Gateway</CardTitle>
+                    <CardTitle>OpenClaw CLI</CardTitle>
                     <CardDescription>
-                      Always-on managed connection from AgenticOS backend service configuration.
+                      CLI-backed agent workspace and session management.
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-3">
                     <div className="flex flex-wrap items-center gap-2">
-                      <Badge variant={gatewayLoading ? "outline" : "secondary"}>{gatewayLoading ? "Syncing" : "Auto-sync active"}</Badge>
+                      <Badge variant={gatewayLoading ? "outline" : "secondary"}>{gatewayLoading ? "Syncing" : "Synced"}</Badge>
                       <Badge variant={gatewayConnected ? "secondary" : "outline"}>{gatewayConnected ? "Connected" : "Disconnected"}</Badge>
                       <Badge variant="outline">Transport: CLI</Badge>
                       <Badge variant="outline">Target: {gatewayTarget}</Badge>
@@ -4030,6 +4036,34 @@ export function OpenclawDashboard() {
                   </CardContent>
                 </Card>
               </div>
+            </TabsContent>
+
+            <TabsContent value="gateway" className="mt-0">
+              <Card>
+                <CardHeader>
+                  <CardTitle>OpenClaw CLI Status</CardTitle>
+                  <CardDescription>Slim connection panel. Agent management is in the `Agents` tab.</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant={gatewayConnected ? "secondary" : "outline"}>{gatewayConnected ? "Connected" : "Disconnected"}</Badge>
+                    <Badge variant="outline">Transport: CLI</Badge>
+                    <Badge variant="outline">Target: {gatewayTarget}</Badge>
+                    <span className="text-xs text-muted-foreground">{gatewayStatus}</span>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button onClick={() => void syncGatewayBootstrap()} disabled={gatewayLoading}>
+                      {gatewayLoading ? "Syncing..." : "Sync OpenClaw"}
+                    </Button>
+                    <Button variant="outline" onClick={() => void loadGatewayAgents()}>
+                      Reload Agents
+                    </Button>
+                    <Button variant="outline" onClick={() => void loadAgentLogs(gatewaySelectedAgent)}>
+                      Reload Logs
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
             </TabsContent>
           </Tabs>
 

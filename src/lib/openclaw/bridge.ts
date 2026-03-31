@@ -93,7 +93,11 @@ function deepCollectArrays(payload: unknown, predicate: (row: Record<string, unk
       continue;
     }
     if (typeof current === "object") {
-      for (const value of Object.values(current as Record<string, unknown>)) queue.push(value);
+      const row = asObject(current);
+      if (Object.keys(row).length > 0 && predicate(row)) {
+        found.push(row);
+      }
+      for (const value of Object.values(row)) queue.push(value);
     }
   }
   return found;
@@ -569,14 +573,55 @@ export class OpenclawBridge {
 
   private buildSessions(payload: unknown): BridgeSession[] {
     const baseItems = extractArrayShallow(payload, ["items", "sessions", "entries", "list", "values"]);
+    const roots = [payload, asObject(payload).payload, asObject(payload).data].map((entry) => asObject(entry));
+    const objectMapItems = roots
+      .flatMap((root) => {
+        const maps = [root, asObject(root.sessions), asObject(root.items), asObject(root.entries)];
+        return maps.flatMap((map) =>
+          Object.entries(map).flatMap(([mapKey, mapValue]) => {
+            const row = asObject(mapValue);
+            if (Object.keys(row).length === 0) return [];
+            const maybeSession = [
+              row.id,
+              row.sessionId,
+              row.session_id,
+              row.sessionKey,
+              row.state,
+              row.status,
+              row.agent,
+              row.agentId,
+              row.nodeId,
+              row.updatedAt,
+              row.createdAt,
+            ].some((value) => typeof value === "string" || typeof value === "number");
+            if (!maybeSession) return [];
+            return [{ ...row, key: typeof row.key === "string" && row.key.trim() ? row.key : mapKey }];
+          })
+        );
+      })
+      .map((entry) => asObject(entry));
     const deepItems = deepCollectArrays(payload, (row) =>
-      ["id", "sessionId", "key", "state", "status", "agent", "agentId", "nodeId"].some((k) => k in row)
+      ["id", "sessionId", "session_id", "sessionKey", "key", "state", "status", "agent", "agentId", "nodeId"].some((k) => k in row)
     );
-    const all = [...baseItems.map((entry) => asObject(entry)), ...deepItems];
+    const all = [...baseItems.map((entry) => asObject(entry)), ...objectMapItems, ...deepItems];
     const uniq = new Map<string, BridgeSession>();
     for (const row of all) {
-      const id = typeof row.id === "string" ? row.id : typeof row.sessionId === "string" ? row.sessionId : "";
-      const key = typeof row.key === "string" ? row.key : typeof row.name === "string" ? row.name : id || "session";
+      const id =
+        typeof row.id === "string"
+          ? row.id
+          : typeof row.sessionId === "string"
+            ? row.sessionId
+            : typeof row.session_id === "string"
+              ? row.session_id
+              : "";
+      const key =
+        typeof row.key === "string"
+          ? row.key
+          : typeof row.sessionKey === "string"
+            ? row.sessionKey
+            : typeof row.name === "string"
+              ? row.name
+              : id || "session";
       const state = typeof row.state === "string" ? row.state : typeof row.status === "string" ? row.status : "unknown";
       const agent =
         typeof row.agent === "string"
@@ -587,7 +632,7 @@ export class OpenclawBridge {
               ? row.nodeId
               : undefined;
       const updatedAt = toIso(row.updatedAt ?? row.updated_at ?? row.createdAt ?? row.created_at);
-      const stableId = id || `${key}:${agent || "none"}`;
+      const stableId = id || key || `${agent || "agent"}:${updatedAt || "session"}`;
       if (!uniq.has(stableId)) {
         uniq.set(stableId, {
           id: stableId,
@@ -869,23 +914,27 @@ export class OpenclawBridge {
   async getSessionHistory(agentId: string, sessionId: string, limit = 200, sessionKey?: string): Promise<BridgeChatMessage[]> {
     const normalizedSessionId = sessionId.trim();
     const normalizedSessionKey = sessionKey?.trim() || "";
-    const maxLimit = Math.max(20, Math.min(5000, limit));
+    const maxLimit = Math.max(20, Math.min(50000, limit));
     const historyAttempts: string[][] = [];
     if (normalizedSessionId) {
       historyAttempts.push(
+        ["sessions", "history", "--session-id", normalizedSessionId, "--limit", String(maxLimit), "--json"],
         ["sessions", "history", "--session-id", normalizedSessionId, "--json"],
         ["sessions", "history", "--session", normalizedSessionId, "--json"],
         ["sessions", "history", "--id", normalizedSessionId, "--json"],
         ["sessions", "history", normalizedSessionId, "--json"],
+        ["session", "history", "--session-id", normalizedSessionId, "--limit", String(maxLimit), "--json"],
         ["session", "history", "--session-id", normalizedSessionId, "--json"],
         ["session", "history", normalizedSessionId, "--json"]
       );
     }
     if (normalizedSessionKey) {
       historyAttempts.push(
+        ["sessions", "history", "--session-key", normalizedSessionKey, "--limit", String(maxLimit), "--json"],
         ["sessions", "history", "--session-key", normalizedSessionKey, "--json"],
         ["sessions", "history", "--key", normalizedSessionKey, "--json"],
         ["sessions", "history", normalizedSessionKey, "--json"],
+        ["session", "history", "--session-key", normalizedSessionKey, "--limit", String(maxLimit), "--json"],
         ["session", "history", "--session-key", normalizedSessionKey, "--json"]
       );
     }

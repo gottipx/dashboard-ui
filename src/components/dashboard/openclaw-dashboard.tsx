@@ -222,6 +222,10 @@ const AUTH_ENABLED = true;
 const ISSUE_TYPES: IssueType[] = ["Bug", "Story", "Task", "Epic", "Spike", "Incident", "Improvement", "Chore"];
 const PRIORITIES: Priority[] = ["Highest", "High", "Medium", "Low", "Lowest"];
 const CORE_AGENT_FILES = ["AGENTS.md", "BOOTSTRAP.md", "IDENTITY.md", "SOUL.md", "TOOLS.md", "USER.md"] as const;
+const OPENCLAW_SELECTED_AGENT_STORAGE_KEY = "agenticos:openclaw:selected-agent";
+const OPENCLAW_SELECTED_SESSION_STORAGE_KEY = "agenticos:openclaw:selected-session";
+const SESSION_HISTORY_PAGE_SIZE = 300;
+const SESSION_HISTORY_LIMIT_MAX = 50000;
 
 const navItems: NavItem[] = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
@@ -337,6 +341,10 @@ function sessionToken(session: GatewaySessionEntry, index = 0) {
 
 function chatHistoryKey(agentId: string, sessionId: string) {
   return `${agentId}::${sessionId}`;
+}
+
+function clampSessionHistoryLimit(limit: number) {
+  return Math.max(20, Math.min(SESSION_HISTORY_LIMIT_MAX, Math.floor(limit)));
 }
 
 function extractAgentReplyText(payload: unknown): string {
@@ -850,6 +858,8 @@ export function OpenclawDashboard() {
   const [gatewaySelectedSessionId, setGatewaySelectedSessionId] = useState("");
   const [gatewayChatMessage, setGatewayChatMessage] = useState("");
   const [gatewayChatMessages, setGatewayChatMessages] = useState<AgentChatMessage[]>([]);
+  const [gatewayHistoryLoading, setGatewayHistoryLoading] = useState(false);
+  const [gatewayHistoryLimit, setGatewayHistoryLimit] = useState(SESSION_HISTORY_PAGE_SIZE);
   const [gatewayStreamingMessageId, setGatewayStreamingMessageId] = useState<string | null>(null);
   const [gatewayActionLoading, setGatewayActionLoading] = useState(false);
   const [gatewayModels, setGatewayModels] = useState<string[]>([]);
@@ -887,6 +897,7 @@ export function OpenclawDashboard() {
   const sessionCacheRef = useRef<Map<string, GatewaySessionEntry[]>>(new Map());
   const coreFilesCacheRef = useRef<Map<string, Record<string, string>>>(new Map());
   const chatHistoryCacheRef = useRef<Map<string, AgentChatMessage[]>>(new Map());
+  const historyLimitCacheRef = useRef<Map<string, number>>(new Map());
 
   const [newTask, setNewTask] = useState({
     title: "",
@@ -954,6 +965,38 @@ export function OpenclawDashboard() {
   useEffect(() => {
     document.documentElement.classList.toggle("dark", darkMode);
   }, [darkMode]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const persistedAgent = window.localStorage.getItem(OPENCLAW_SELECTED_AGENT_STORAGE_KEY)?.trim() ?? "";
+    const persistedSession = window.localStorage.getItem(OPENCLAW_SELECTED_SESSION_STORAGE_KEY)?.trim() ?? "";
+    if (persistedAgent) {
+      setGatewaySelectedAgent(persistedAgent);
+    }
+    if (persistedSession) {
+      setGatewaySelectedSessionId(persistedSession);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const value = gatewaySelectedAgent.trim();
+    if (!value) {
+      window.localStorage.removeItem(OPENCLAW_SELECTED_AGENT_STORAGE_KEY);
+      return;
+    }
+    window.localStorage.setItem(OPENCLAW_SELECTED_AGENT_STORAGE_KEY, value);
+  }, [gatewaySelectedAgent]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const value = gatewaySelectedSessionId.trim();
+    if (!value) {
+      window.localStorage.removeItem(OPENCLAW_SELECTED_SESSION_STORAGE_KEY);
+      return;
+    }
+    window.localStorage.setItem(OPENCLAW_SELECTED_SESSION_STORAGE_KEY, value);
+  }, [gatewaySelectedSessionId]);
 
   useEffect(() => {
     if (!userId) return;
@@ -2246,6 +2289,9 @@ export function OpenclawDashboard() {
         }, 22);
       });
       setGatewayStreamingMessageId(null);
+      window.setTimeout(() => {
+        void loadGatewaySessionHistory(true);
+      }, 120);
     } catch (error) {
       setDashboardNotice({ type: "error", message: error instanceof Error ? error.message : "Agent chat failed" });
       setGatewayStreamingMessageId(null);
@@ -2320,9 +2366,25 @@ export function OpenclawDashboard() {
             : [];
       const mappedSessions: GatewaySessionEntry[] = sessionItems.map((item) => {
         const row = item as Record<string, unknown>;
+        const rowId =
+          typeof row.id === "string"
+            ? row.id
+            : typeof row.sessionId === "string"
+              ? row.sessionId
+              : typeof row.session_id === "string"
+                ? row.session_id
+                : undefined;
+        const rowKey =
+          typeof row.key === "string"
+            ? row.key
+            : typeof row.sessionKey === "string"
+              ? row.sessionKey
+              : typeof row.session_key === "string"
+                ? row.session_key
+                : undefined;
         return {
-          id: typeof row.id === "string" ? row.id : undefined,
-          key: typeof row.key === "string" ? row.key : undefined,
+          id: rowId,
+          key: rowKey,
           state: typeof row.state === "string" ? row.state : undefined,
         };
       });
@@ -2448,19 +2510,27 @@ export function OpenclawDashboard() {
       });
       const mapped = (result.sessions ?? []).map((entry) => {
         const row = entry as Record<string, unknown>;
+        const rowId =
+          typeof row.id === "string"
+            ? row.id
+            : typeof row.sessionId === "string"
+              ? row.sessionId
+              : typeof row.session_id === "string"
+                ? row.session_id
+                : undefined;
+        const rowKey =
+          typeof row.key === "string"
+            ? row.key
+            : typeof row.sessionKey === "string"
+              ? row.sessionKey
+              : typeof row.session_key === "string"
+                ? row.session_key
+                : typeof row.name === "string"
+                  ? row.name
+                  : undefined;
         return {
-          id:
-            typeof row.id === "string"
-              ? row.id
-              : typeof row.sessionId === "string"
-                ? row.sessionId
-                : undefined,
-          key:
-            typeof row.key === "string"
-              ? row.key
-              : typeof row.name === "string"
-                ? row.name
-                : undefined,
+          id: rowId,
+          key: rowKey,
           state:
             typeof row.state === "string"
               ? row.state
@@ -2502,31 +2572,32 @@ export function OpenclawDashboard() {
     }
   };
 
-  const createLocalGatewaySession = () => {
+  const createGatewaySession = async () => {
     const agentId = gatewaySelectedAgent.trim();
     if (!agentId) {
       setDashboardNotice({ type: "error", message: "Select an agent first." });
       return;
     }
-    const sessionId = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `session-${Date.now()}`;
-    const nextSession: GatewaySessionEntry = {
-      id: sessionId,
-      key: `agent:${agentId}:${sessionId.slice(0, 8)}`,
-      state: "new",
-      agent: agentId,
-      updatedAt: new Date().toISOString(),
-    };
-    setGatewaySessions((prev) => {
-      const next = [nextSession, ...prev];
-      sessionCacheRef.current.set(`selected:${agentId}`, next);
-      return next;
-    });
-    setGatewaySelectedSessionId(sessionId);
-    const key = chatHistoryKey(agentId, sessionId);
-    if (!chatHistoryCacheRef.current.has(key)) {
-      chatHistoryCacheRef.current.set(key, []);
+    setGatewayActionLoading(true);
+    try {
+      const baseSessionId = (gatewaySelectedSession?.id || gatewaySelectedSessionToken).trim() || undefined;
+      const result = await runAgentAction<{ sessionId?: string }>({
+        action: "chat",
+        agentId,
+        sessionId: baseSessionId,
+        message: "/new",
+      });
+      await loadGatewaySessions(agentId, "selected", true);
+      if (result.sessionId?.trim()) {
+        setGatewaySelectedSessionId(result.sessionId.trim());
+      }
+      await loadGatewaySessionHistory(true);
+      setDashboardNotice({ type: "success", message: "New session created." });
+    } catch (error) {
+      setDashboardNotice({ type: "error", message: error instanceof Error ? error.message : "Session creation failed" });
+    } finally {
+      setGatewayActionLoading(false);
     }
-    setGatewayChatMessages([]);
   };
 
   const deleteGatewaySession = async (session: GatewaySessionEntry, index: number) => {
@@ -2616,27 +2687,35 @@ export function OpenclawDashboard() {
     }
   };
 
-  const loadGatewaySessionHistory = async (force = false) => {
+  const loadGatewaySessionHistory = async (force = false, limitOverride?: number) => {
     const agentId = gatewaySelectedAgent.trim();
     const sessionTokenValue = gatewaySelectedSessionToken.trim();
     const sessionId = (gatewaySelectedSession?.id || sessionTokenValue).trim();
     const sessionKey = gatewaySelectedSession?.key?.trim();
     if (!agentId || (!sessionId && !sessionKey)) {
       setGatewayChatMessages([]);
+      setGatewayHistoryLoading(false);
+      setGatewayHistoryLimit(SESSION_HISTORY_PAGE_SIZE);
       return;
     }
     const key = chatHistoryKey(agentId, sessionTokenValue || sessionId || sessionKey || "session");
+    const cachedLimit = historyLimitCacheRef.current.get(key) ?? SESSION_HISTORY_PAGE_SIZE;
+    const effectiveLimit = clampSessionHistoryLimit(limitOverride ?? cachedLimit);
+    historyLimitCacheRef.current.set(key, effectiveLimit);
+    setGatewayHistoryLimit(effectiveLimit);
     if (!force && chatHistoryCacheRef.current.has(key)) {
       setGatewayChatMessages(chatHistoryCacheRef.current.get(key) ?? []);
+      setGatewayHistoryLoading(false);
       return;
     }
+    setGatewayHistoryLoading(true);
     try {
       const result = await runAgentAction<{ messages?: AgentChatMessage[] }>({
         action: "session-history",
         agentId,
         sessionId,
         sessionKey,
-        limit: 5000,
+        limit: effectiveLimit,
       });
       const messages: AgentChatMessage[] = (result.messages ?? []).map((entry, idx) => {
         const message: AgentChatMessage = {
@@ -2652,7 +2731,22 @@ export function OpenclawDashboard() {
     } catch {
       const fallback = chatHistoryCacheRef.current.get(key) ?? [];
       setGatewayChatMessages(fallback);
+    } finally {
+      setGatewayHistoryLoading(false);
     }
+  };
+
+  const loadMoreGatewaySessionHistory = async () => {
+    const agentId = gatewaySelectedAgent.trim();
+    const sessionTokenValue = gatewaySelectedSessionToken.trim();
+    const sessionId = (gatewaySelectedSession?.id || sessionTokenValue).trim();
+    const sessionKey = gatewaySelectedSession?.key?.trim();
+    if (!agentId || (!sessionId && !sessionKey)) return;
+    const key = chatHistoryKey(agentId, sessionTokenValue || sessionId || sessionKey || "session");
+    const currentLimit = historyLimitCacheRef.current.get(key) ?? gatewayHistoryLimit ?? SESSION_HISTORY_PAGE_SIZE;
+    const nextLimit = clampSessionHistoryLimit(currentLimit + SESSION_HISTORY_PAGE_SIZE);
+    if (nextLimit <= currentLimit) return;
+    await loadGatewaySessionHistory(true, nextLimit);
   };
 
   const loadAgentLogs = async (agentId?: string, range: "all" | "2h" = logRange, force = false) => {
@@ -2830,7 +2924,7 @@ export function OpenclawDashboard() {
     if (!gatewayConnected) return;
     if (!gatewaySelectedAgent.trim()) return;
     if (!gatewaySelectedSessionToken.trim()) return;
-    void loadGatewaySessionHistory();
+    void loadGatewaySessionHistory(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gatewayConnected, gatewaySelectedAgent, gatewaySelectedSessionToken]);
 
@@ -2878,11 +2972,18 @@ export function OpenclawDashboard() {
     setCalendarEvents([]);
     setGatewayCoreFiles({});
     setGatewayChatMessages([]);
+    setGatewayHistoryLoading(false);
+    setGatewayHistoryLimit(SESSION_HISTORY_PAGE_SIZE);
     setGatewaySelectedSessionId("");
     chatHistoryCacheRef.current.clear();
+    historyLimitCacheRef.current.clear();
     coreFilesCacheRef.current.clear();
     sessionCacheRef.current.clear();
     agentCacheRef.current = { loaded: false, data: [] };
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem(OPENCLAW_SELECTED_AGENT_STORAGE_KEY);
+      window.localStorage.removeItem(OPENCLAW_SELECTED_SESSION_STORAGE_KEY);
+    }
     setHydrated(false);
   };
 
@@ -4547,7 +4648,7 @@ export function OpenclawDashboard() {
                       })}
                     </select>
                     <div className="flex items-center gap-2">
-                      <Button size="sm" variant="outline" onClick={createLocalGatewaySession}>
+                      <Button size="sm" variant="outline" onClick={() => void createGatewaySession()} disabled={gatewayActionLoading}>
                         New Session
                       </Button>
                       <Button
@@ -4576,6 +4677,25 @@ export function OpenclawDashboard() {
                       ))}
                     </select>
                     <p className="text-[11px] text-muted-foreground">Active: {gatewayModelStatus || "n/a"}</p>
+                  </div>
+
+                  <div className="flex items-center justify-between rounded-md border border-border/70 bg-background/60 px-3 py-2">
+                    <p className="text-xs text-muted-foreground">
+                      Loaded {gatewayChatMessages.length} messages (limit {gatewayHistoryLimit})
+                    </p>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void loadMoreGatewaySessionHistory()}
+                      disabled={
+                        gatewayHistoryLoading ||
+                        gatewayActionLoading ||
+                        !gatewaySelectedSessionToken ||
+                        gatewayHistoryLimit >= SESSION_HISTORY_LIMIT_MAX
+                      }
+                    >
+                      {gatewayHistoryLoading ? "Loading..." : "Load more history"}
+                    </Button>
                   </div>
 
                   <ScrollArea className="h-[520px] rounded-lg border bg-zinc-950 p-3 text-xs text-zinc-200">

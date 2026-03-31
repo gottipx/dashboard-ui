@@ -88,7 +88,7 @@ export async function POST(request: Request) {
       if (!agentId || (!sessionId && !sessionKey)) {
         return NextResponse.json({ ok: true, messages: [] });
       }
-      const limit = Math.max(20, Math.min(5000, Number(body.limit ?? 1200)));
+      const limit = Math.max(20, Math.min(50000, Number(body.limit ?? 5000)));
       const messages = await openclawBridge.getSessionHistory(agentId, sessionId ?? "", limit, sessionKey);
       return NextResponse.json({ ok: true, messages });
     }

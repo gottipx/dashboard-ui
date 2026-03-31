@@ -26,24 +26,31 @@ function resolveCliProcess(args: string[]) {
 }
 
 function parseJsonFromStdout(stdout: string): unknown {
+  const trimmedStdout = stdout.trim();
+  if (!trimmedStdout) return {};
+  try {
+    return JSON.parse(trimmedStdout) as unknown;
+  } catch {
+    // continue with line-wise parsing
+  }
+
   const lines = stdout
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
-    const line = lines[i];
+  const parsedJsonLines: unknown[] = [];
+  for (const line of lines) {
     if (!line.startsWith("{") && !line.startsWith("[")) continue;
     try {
-      return JSON.parse(line) as unknown;
+      parsedJsonLines.push(JSON.parse(line) as unknown);
     } catch {
-      // keep searching
+      // ignore malformed line
     }
   }
-  try {
-    return JSON.parse(stdout) as unknown;
-  } catch {
-    return { raw: stdout };
-  }
+  if (parsedJsonLines.length === 1) return parsedJsonLines[0];
+  if (parsedJsonLines.length > 1) return parsedJsonLines;
+
+  return { raw: stdout };
 }
 
 export async function runOpenclawCliJson(args: string[], timeoutMs = 15000): Promise<unknown> {

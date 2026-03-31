@@ -5,9 +5,11 @@ import { openclawBridge } from "@/lib/openclaw/bridge";
 export const runtime = "nodejs";
 
 type Body = {
-  action?: "sessions" | "chat" | "dispatch-task";
+  action?: "sessions" | "chat" | "dispatch-task" | "session-history";
   force?: boolean;
   agentId?: string;
+  sessionId?: string;
+  limit?: number;
   message?: string;
   kind?: "task" | "issue" | "project";
   task?: {
@@ -57,8 +59,27 @@ export async function POST(request: Request) {
       if (!message || !agentId) {
         return NextResponse.json({ ok: false, error: "Agent and message are required." }, { status: 400 });
       }
-      const result = await openclawBridge.sendChat(agentId, message);
-      return NextResponse.json({ ok: true, payload: result.payload, text: result.text, source: result.source, runId: result.runId });
+      const sessionId = body.sessionId?.trim();
+      const result = await openclawBridge.sendChat(agentId, message, sessionId);
+      return NextResponse.json({
+        ok: true,
+        payload: result.payload,
+        text: result.text,
+        source: result.source,
+        runId: result.runId,
+        sessionId: result.sessionId,
+      });
+    }
+
+    if (body.action === "session-history") {
+      const agentId = body.agentId?.trim();
+      const sessionId = body.sessionId?.trim();
+      if (!agentId || !sessionId) {
+        return NextResponse.json({ ok: true, messages: [] });
+      }
+      const limit = Math.max(20, Math.min(500, Number(body.limit ?? 200)));
+      const messages = await openclawBridge.getSessionHistory(agentId, sessionId, limit);
+      return NextResponse.json({ ok: true, messages });
     }
 
     if (body.action === "dispatch-task") {

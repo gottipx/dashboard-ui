@@ -7,7 +7,7 @@ export const runtime = "nodejs";
 type Body = {
   agentId?: string;
   limit?: number;
-  range?: "all" | "12h";
+  range?: "all" | "2h";
   force?: boolean;
 };
 
@@ -26,7 +26,7 @@ export async function POST(request: Request) {
       await openclawBridge.sync();
     }
 
-    const range = body.range === "12h" ? "12h" : "all";
+    const range = body.range === "2h" ? "2h" : "all";
     const limit = Math.max(50, Math.min(3000, Number(body.limit ?? 500)));
     const selected = openclawBridge.getLogs(body.agentId, range, limit);
 

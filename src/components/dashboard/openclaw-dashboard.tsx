@@ -46,6 +46,7 @@ import {
   ListChecks,
   Menu,
   Moon,
+  MessageSquare,
   Pin,
   PinOff,
   Plus,
@@ -206,7 +207,7 @@ type OpenclawLogsResponse = {
   logs?: string[];
   source?: string;
   warning?: string;
-  range?: "all" | "12h";
+  range?: "all" | "2h";
 };
 
 type AgentChatMessage = {
@@ -228,6 +229,7 @@ const navItems: NavItem[] = [
   { id: "projects", label: "Projects", icon: FileText },
   { id: "issues", label: "Issues", icon: Siren },
   { id: "metrics", label: "Statistics", icon: Activity },
+  { id: "agent-chat", label: "Agents Chat", icon: MessageSquare },
   { id: "logs", label: "Agent Logs", icon: TerminalSquare },
   { id: "calendar", label: "Calendar", icon: CalendarClock },
   { id: "gateway", label: "OpenClaw", icon: Wifi },
@@ -326,6 +328,14 @@ function parseLogLine(line: string) {
     message: tsMatch ? tsMatch[2] : trimmed,
     level: levelMatch ? levelMatch[1].toUpperCase() : "",
   };
+}
+
+function sessionToken(session: GatewaySessionEntry, index = 0) {
+  return session.id || session.key || `session-${index + 1}`;
+}
+
+function chatHistoryKey(agentId: string, sessionId: string) {
+  return `${agentId}::${sessionId}`;
 }
 
 function extractAgentReplyText(payload: unknown): string {
@@ -836,11 +846,13 @@ export function OpenclawDashboard() {
   const [gatewayActiveCoreFile, setGatewayActiveCoreFile] = useState<(typeof CORE_AGENT_FILES)[number]>("AGENTS.md");
   const [gatewayCoreFilesLoading, setGatewayCoreFilesLoading] = useState(false);
   const [gatewaySelectedAgent, setGatewaySelectedAgent] = useState("");
+  const [gatewaySelectedSessionId, setGatewaySelectedSessionId] = useState("");
   const [gatewayChatMessage, setGatewayChatMessage] = useState("");
   const [gatewayChatMessages, setGatewayChatMessages] = useState<AgentChatMessage[]>([]);
+  const [gatewayStreamingMessageId, setGatewayStreamingMessageId] = useState<string | null>(null);
   const [gatewayActionLoading, setGatewayActionLoading] = useState(false);
   const [openclawLogSource, setOpenclawLogSource] = useState<string>("");
-  const [logRange, setLogRange] = useState<"all" | "12h">("all");
+  const [logRange, setLogRange] = useState<"all" | "2h">("2h");
   const [autoDispatchTasks, setAutoDispatchTasks] = useState(true);
 
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -1819,6 +1831,13 @@ export function OpenclawDashboard() {
     [gatewayAgents]
   );
   const gatewayActiveCoreContent = gatewayCoreFiles[gatewayActiveCoreFile] ?? "";
+  const gatewaySelectedSessionIndex = gatewaySessions.findIndex(
+    (session, idx) => sessionToken(session, idx) === gatewaySelectedSessionId
+  );
+  const gatewaySelectedSession = gatewaySelectedSessionIndex >= 0 ? gatewaySessions[gatewaySelectedSessionIndex] : gatewaySessions[0];
+  const gatewaySelectedSessionToken = gatewaySelectedSession
+    ? sessionToken(gatewaySelectedSession, gatewaySelectedSessionIndex >= 0 ? gatewaySelectedSessionIndex : 0)
+    : "";
   const tagById = useMemo(() => new Map(tags.map((tag) => [tag.id, tag])), [tags]);
   const selectedAgent = agents.find((agent) => agent.name === selectedAgentName) ?? agents[0];
   const isSidebarExpanded = isSidebarPinned || isSidebarOpenedByButton;
@@ -2140,14 +2159,20 @@ export function OpenclawDashboard() {
   const runAgentChat = async () => {
     const agentId = gatewaySelectedAgent.trim();
     const message = gatewayChatMessage.trim();
+    const sessionId = gatewaySelectedSessionToken.trim();
     if (!agentId) {
       setDashboardNotice({ type: "error", message: "Select an agent first." });
+      return;
+    }
+    if (!sessionId) {
+      setDashboardNotice({ type: "error", message: "Select or create a session first." });
       return;
     }
     if (!message) {
       setDashboardNotice({ type: "error", message: "Enter a message first." });
       return;
     }
+    const historyKey = chatHistoryKey(agentId, sessionId);
     setGatewayChatMessages((prev) => {
       const nextMessage: AgentChatMessage = {
         id: `u-${Date.now()}`,
@@ -2156,35 +2181,59 @@ export function OpenclawDashboard() {
         at: new Date().toISOString(),
       };
       const next = [...prev, nextMessage];
-      chatHistoryCacheRef.current.set(agentId, next);
+      chatHistoryCacheRef.current.set(historyKey, next);
       return next;
     });
     setGatewayChatMessage("");
     setGatewayActionLoading(true);
     try {
-      const result = await runAgentAction<{ source?: string; payload?: unknown; text?: string }>({
+      const result = await runAgentAction<{ source?: string; payload?: unknown; text?: string; sessionId?: string }>({
         action: "chat",
         agentId,
+        sessionId,
         message,
       });
       const text = result.text || extractAgentReplyText(result.payload);
+      const activeSessionId = result.sessionId?.trim() || sessionId;
+      if (activeSessionId && activeSessionId !== sessionId) {
+        setGatewaySelectedSessionId(activeSessionId);
+      }
+      const targetHistoryKey = chatHistoryKey(agentId, activeSessionId);
+      const placeholderId = `a-${Date.now()}`;
+      setGatewayStreamingMessageId(placeholderId);
       setGatewayChatMessages((prev) => {
-        const nextMessage: AgentChatMessage = {
-          id: `a-${Date.now()}`,
+        const placeholder: AgentChatMessage = {
+          id: placeholderId,
           role: "agent",
-          text,
+          text: "",
           at: new Date().toISOString(),
         };
-        const next = [...prev, nextMessage];
-        chatHistoryCacheRef.current.set(agentId, next);
+        const next = [...prev, placeholder];
+        chatHistoryCacheRef.current.set(targetHistoryKey, next);
         return next;
       });
-      setDashboardNotice({
-        type: "success",
-        message: `Message delivered to ${agentId}${result.source ? ` via ${result.source}` : ""}.`,
+      const fullText = text;
+      let cursor = 0;
+      const chunk = Math.max(4, Math.min(16, Math.ceil(fullText.length / 40)));
+      await new Promise<void>((resolve) => {
+        const timer = window.setInterval(() => {
+          cursor = Math.min(fullText.length, cursor + chunk);
+          const partial = fullText.slice(0, cursor);
+          setGatewayChatMessages((prev) => {
+            const next = prev.map((entry) => (entry.id === placeholderId ? { ...entry, text: partial } : entry));
+            chatHistoryCacheRef.current.set(targetHistoryKey, next);
+            return next;
+          });
+          if (cursor >= fullText.length) {
+            window.clearInterval(timer);
+            resolve();
+          }
+        }, 22);
       });
+      setGatewayStreamingMessageId(null);
     } catch (error) {
       setDashboardNotice({ type: "error", message: error instanceof Error ? error.message : "Agent chat failed" });
+      setGatewayStreamingMessageId(null);
     } finally {
       setGatewayActionLoading(false);
     }
@@ -2334,9 +2383,6 @@ export function OpenclawDashboard() {
         setSelectedAgentName(nextSelected.name || nextSelected.id || "gateway-agent");
         const nextValue = nextSelected.id || nextSelected.name || "";
         setGatewaySelectedAgent(nextValue);
-        if (nextValue) {
-          setGatewayChatMessages(chatHistoryCacheRef.current.get(nextValue) ?? []);
-        }
         return nextValue;
       } else if (gatewayNodes.length > 0) {
         setGatewayAgents(
@@ -2414,6 +2460,13 @@ export function OpenclawDashboard() {
       });
       sessionCacheRef.current.set(cacheKey, mapped);
       setGatewaySessions(mapped);
+      if (scope === "selected") {
+        const current = gatewaySelectedSessionId.trim();
+        const found = mapped.some((session, idx) => sessionToken(session, idx) === current);
+        if (!found) {
+          setGatewaySelectedSessionId(mapped.length > 0 ? sessionToken(mapped[0], 0) : "");
+        }
+      }
       if (result.warning) {
         setGatewayStatus(result.warning);
       }
@@ -2422,7 +2475,70 @@ export function OpenclawDashboard() {
     }
   };
 
-  const loadAgentLogs = async (agentId?: string, range: "all" | "12h" = logRange, force = false) => {
+  const createLocalGatewaySession = () => {
+    const agentId = gatewaySelectedAgent.trim();
+    if (!agentId) {
+      setDashboardNotice({ type: "error", message: "Select an agent first." });
+      return;
+    }
+    const sessionId = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `session-${Date.now()}`;
+    const nextSession: GatewaySessionEntry = {
+      id: sessionId,
+      key: `agent:${agentId}:${sessionId.slice(0, 8)}`,
+      state: "new",
+      agent: agentId,
+      updatedAt: new Date().toISOString(),
+    };
+    setGatewaySessions((prev) => {
+      const next = [nextSession, ...prev];
+      sessionCacheRef.current.set(`selected:${agentId}`, next);
+      return next;
+    });
+    setGatewaySelectedSessionId(sessionId);
+    const key = chatHistoryKey(agentId, sessionId);
+    if (!chatHistoryCacheRef.current.has(key)) {
+      chatHistoryCacheRef.current.set(key, []);
+    }
+    setGatewayChatMessages([]);
+  };
+
+  const loadGatewaySessionHistory = async (force = false) => {
+    const agentId = gatewaySelectedAgent.trim();
+    const sessionId = gatewaySelectedSessionToken.trim();
+    if (!agentId || !sessionId) {
+      setGatewayChatMessages([]);
+      return;
+    }
+    const key = chatHistoryKey(agentId, sessionId);
+    if (!force && chatHistoryCacheRef.current.has(key)) {
+      setGatewayChatMessages(chatHistoryCacheRef.current.get(key) ?? []);
+      return;
+    }
+    try {
+      const result = await runAgentAction<{ messages?: AgentChatMessage[] }>({
+        action: "session-history",
+        agentId,
+        sessionId,
+        limit: 300,
+      });
+      const messages: AgentChatMessage[] = (result.messages ?? []).map((entry, idx) => {
+        const message: AgentChatMessage = {
+          id: entry.id || `h-${idx}-${Date.now()}`,
+          role: entry.role === "agent" ? "agent" : "user",
+          text: entry.text ?? "",
+          at: entry.at ?? new Date().toISOString(),
+        };
+        return message;
+      });
+      chatHistoryCacheRef.current.set(key, messages);
+      setGatewayChatMessages(messages);
+    } catch {
+      const fallback = chatHistoryCacheRef.current.get(key) ?? [];
+      setGatewayChatMessages(fallback);
+    }
+  };
+
+  const loadAgentLogs = async (agentId?: string, range: "all" | "2h" = logRange, force = false) => {
     try {
       const result = await gatewayApi<OpenclawLogsResponse>("/api/openclaw/gateway/logs", {
         agentId: agentId?.trim() || undefined,
@@ -2572,13 +2688,30 @@ export function OpenclawDashboard() {
   }, [gatewayConnected, gatewaySelectedAgent]);
 
   useEffect(() => {
-    const key = gatewaySelectedAgent.trim();
-    if (!key) {
+    if (!gatewaySelectedAgent.trim()) {
+      setGatewaySelectedSessionId("");
       setGatewayChatMessages([]);
       return;
     }
-    setGatewayChatMessages(chatHistoryCacheRef.current.get(key) ?? []);
-  }, [gatewaySelectedAgent]);
+    if (gatewaySessions.length === 0) {
+      setGatewaySelectedSessionId("");
+      setGatewayChatMessages([]);
+      return;
+    }
+    const found = gatewaySessions.find((session, idx) => sessionToken(session, idx) === gatewaySelectedSessionId);
+    if (!found) {
+      const first = gatewaySessions[0];
+      setGatewaySelectedSessionId(sessionToken(first, 0));
+    }
+  }, [gatewaySelectedAgent, gatewaySessions, gatewaySelectedSessionId]);
+
+  useEffect(() => {
+    if (!gatewayConnected) return;
+    if (!gatewaySelectedAgent.trim()) return;
+    if (!gatewaySelectedSessionToken.trim()) return;
+    void loadGatewaySessionHistory();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gatewayConnected, gatewaySelectedAgent, gatewaySelectedSessionToken]);
 
   useEffect(() => {
     if (!gatewayConnected) return;
@@ -2624,6 +2757,7 @@ export function OpenclawDashboard() {
     setCalendarEvents([]);
     setGatewayCoreFiles({});
     setGatewayChatMessages([]);
+    setGatewaySelectedSessionId("");
     chatHistoryCacheRef.current.clear();
     coreFilesCacheRef.current.clear();
     sessionCacheRef.current.clear();
@@ -3109,6 +3243,7 @@ export function OpenclawDashboard() {
               <TabsTrigger value="issues">Issues</TabsTrigger>
               <TabsTrigger value="metrics">Statistics</TabsTrigger>
               <TabsTrigger value="agents">Agents</TabsTrigger>
+              <TabsTrigger value="agent-chat">Agents Chat</TabsTrigger>
               <TabsTrigger value="logs">Agent Logs</TabsTrigger>
               <TabsTrigger value="calendar">Calendar</TabsTrigger>
               <TabsTrigger value="gateway">OpenClaw</TabsTrigger>
@@ -3952,10 +4087,10 @@ export function OpenclawDashboard() {
                     <Button
                       type="button"
                       size="sm"
-                      variant={logRange === "12h" ? "default" : "outline"}
-                      onClick={() => setLogRange("12h")}
+                      variant={logRange === "2h" ? "default" : "outline"}
+                      onClick={() => setLogRange("2h")}
                     >
-                      Last 12h
+                      Last 2h
                     </Button>
                     <Button
                       type="button"
@@ -4150,50 +4285,7 @@ export function OpenclawDashboard() {
                   </Card>
                 </div>
 
-                <div className="grid gap-3 xl:grid-cols-[1.25fr_1fr]">
-                  <Card>
-                    <CardHeader>
-                      <CardTitle>Agent Chat</CardTitle>
-                      <CardDescription>Persistent per-agent history for this dashboard session.</CardDescription>
-                    </CardHeader>
-                    <CardContent className="space-y-2">
-                      <p className="text-xs text-muted-foreground">Agent: {gatewaySelectedAgent || "not selected"}</p>
-                      <ScrollArea className="h-[420px] rounded-lg border bg-zinc-950 p-3 text-xs text-zinc-200">
-                        <div className="space-y-2">
-                          {gatewayChatMessages.length === 0 && <p className="text-zinc-400">No messages yet.</p>}
-                          {gatewayChatMessages.map((message) => (
-                            <div
-                              key={message.id}
-                              className={cn(
-                                "rounded-md px-2 py-2",
-                                message.role === "user" ? "bg-sky-900/40 text-sky-100" : "bg-zinc-800 text-zinc-100"
-                              )}
-                            >
-                              <div className="mb-1 flex items-center justify-between text-[10px] uppercase text-zinc-400">
-                                <span>{message.role}</span>
-                                <span>{format(new Date(message.at), "HH:mm:ss")}</span>
-                              </div>
-                              <p className="whitespace-pre-wrap text-sm">{message.text}</p>
-                            </div>
-                          ))}
-                        </div>
-                      </ScrollArea>
-                      <div className="space-y-2">
-                        <Textarea
-                          value={gatewayChatMessage}
-                          onChange={(event) => setGatewayChatMessage(event.target.value)}
-                          placeholder="Write an instruction for the selected agent..."
-                          className="min-h-[120px]"
-                        />
-                        <div className="flex items-center gap-2">
-                          <Button onClick={() => void runAgentChat()} disabled={gatewayActionLoading}>
-                            {gatewayActionLoading ? "Sending..." : "Send Message"}
-                          </Button>
-                        </div>
-                      </div>
-                    </CardContent>
-                  </Card>
-
+                <div>
                   <Card>
                     <CardHeader className="flex flex-row items-start justify-between space-y-0">
                       <div className="space-y-1">
@@ -4256,6 +4348,96 @@ export function OpenclawDashboard() {
                   </Card>
                 </div>
               </div>
+            </TabsContent>
+
+            <TabsContent value="agent-chat" className="mt-0">
+              <Card>
+                <CardHeader className="space-y-2">
+                  <CardTitle>Agents Chat</CardTitle>
+                  <CardDescription>Choose an agent and session, then chat with persistent history for that session.</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <div className="grid gap-2 lg:grid-cols-[220px_1fr_auto]">
+                    <select
+                      value={gatewaySelectedAgent}
+                      onChange={(event) => setGatewaySelectedAgent(event.target.value)}
+                      className="h-9 rounded-md border bg-background px-2 text-sm"
+                    >
+                      {gatewayAgentOptions.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={gatewaySelectedSessionToken}
+                      onChange={(event) => setGatewaySelectedSessionId(event.target.value)}
+                      className="h-9 rounded-md border bg-background px-2 text-sm"
+                    >
+                      {gatewaySessions.map((session, idx) => {
+                        const token = sessionToken(session, idx);
+                        return (
+                          <option key={token} value={token}>
+                            {session.key || session.id || token}
+                          </option>
+                        );
+                      })}
+                    </select>
+                    <div className="flex items-center gap-2">
+                      <Button size="sm" variant="outline" onClick={createLocalGatewaySession}>
+                        New Session
+                      </Button>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        onClick={() => void loadGatewaySessionHistory(true)}
+                        aria-label="Reload chat history"
+                        disabled={!gatewaySelectedAgent || !gatewaySelectedSessionToken}
+                      >
+                        <RefreshCw className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+
+                  <ScrollArea className="h-[520px] rounded-lg border bg-zinc-950 p-3 text-xs text-zinc-200">
+                    <div className="space-y-2">
+                      {gatewayChatMessages.length === 0 && <p className="text-zinc-400">No messages yet for this session.</p>}
+                      {gatewayChatMessages.map((message) => (
+                        <div
+                          key={message.id}
+                          className={cn(
+                            "rounded-md px-2 py-2",
+                            message.role === "user" ? "bg-sky-900/40 text-sky-100" : "bg-zinc-800 text-zinc-100"
+                          )}
+                        >
+                          <div className="mb-1 flex items-center justify-between text-[10px] uppercase text-zinc-400">
+                            <span>{message.role}</span>
+                            <span>{format(new Date(message.at), "HH:mm:ss")}</span>
+                          </div>
+                          <p className="whitespace-pre-wrap text-sm">{message.text}</p>
+                        </div>
+                      ))}
+                      {gatewayStreamingMessageId && (
+                        <p className="text-[11px] text-zinc-400">Streaming response...</p>
+                      )}
+                    </div>
+                  </ScrollArea>
+
+                  <div className="space-y-2">
+                    <Textarea
+                      value={gatewayChatMessage}
+                      onChange={(event) => setGatewayChatMessage(event.target.value)}
+                      placeholder="Write an instruction for the selected agent and session..."
+                      className="min-h-[120px]"
+                    />
+                    <div className="flex items-center gap-2">
+                      <Button onClick={() => void runAgentChat()} disabled={gatewayActionLoading || !gatewaySelectedSessionToken}>
+                        {gatewayActionLoading ? "Sending..." : "Send Message"}
+                      </Button>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
             </TabsContent>
 
             <TabsContent value="gateway" className="mt-0">

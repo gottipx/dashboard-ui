@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
+import path from "node:path";
 
 import { runOpenclawCliJson } from "@/lib/openclaw/cli";
 
@@ -32,6 +33,13 @@ export type BridgeRun = {
   input?: unknown;
   output?: unknown;
   error?: string;
+};
+
+export type BridgeChatMessage = {
+  id: string;
+  role: "user" | "agent";
+  text: string;
+  at: string;
 };
 
 export type BridgeState = {
@@ -279,7 +287,9 @@ export class OpenclawBridge {
       });
       const effectiveLogs = agentLogs.length > 0 ? agentLogs : logs;
       const hasError = effectiveLogs.some((line) => /\berror\b|\bfailed\b|\bunreachable\b/i.test(line));
-      const isRunning = (sessionIndex.get(agentKey) ?? 0) > 0;
+      const isRunning =
+        (sessionIndex.get(agentKey) ?? 0) > 0 &&
+        effectiveLogs.some((line) => /\bbusy\b|\bprocessing\b|\bexecuting\b|\bin progress\b|\bworking\b/i.test(line));
       map.set(agentKey, {
         ...agent,
         state: hasError ? "down" : isRunning ? "running" : "ready",
@@ -376,16 +386,16 @@ export class OpenclawBridge {
     });
   }
 
-  getLogs(agentId?: string, range: "all" | "12h" = "all", limit = 500) {
+  getLogs(agentId?: string, range: "all" | "2h" = "2h", limit = 500) {
     const needle = agentId?.trim().toLowerCase();
     const base = needle
       ? this.state.logs.lines.filter((line) => line.toLowerCase().includes(needle))
       : this.state.logs.lines;
-    const lines = range === "12h"
+    const lines = range === "2h"
       ? base.filter((line) => {
           const ts = parseLogTimestamp(line);
           if (!ts) return false;
-          return Date.now() - ts <= 12 * 60 * 60 * 1000;
+          return Date.now() - ts <= 2 * 60 * 60 * 1000;
         })
       : base;
     const selected = (lines.length > 0 ? lines : base).slice(-Math.max(50, Math.min(3000, limit)));
@@ -423,13 +433,24 @@ export class OpenclawBridge {
     this.publish();
   }
 
-  async sendChat(agentId: string, message: string) {
-    const runId = this.registerRun("chat", agentId, `Chat: ${message.slice(0, 60)}`, { message });
+  async sendChat(agentId: string, message: string, sessionId?: string) {
+    const runId = this.registerRun("chat", agentId, `Chat: ${message.slice(0, 60)}`, { message, sessionId });
     this.updateRun(runId, { status: "running" });
-    const cliFirst = await firstSuccessfulCli([
-      ["agent", "--agent", agentId, "--message", message, "--json"],
-      ["agent", "--agent", agentId, "--message", message],
-    ], 60000);
+    const attempts: string[][] = sessionId
+      ? [
+          ["agent", "--agent", agentId, "--session-id", sessionId, "--message", message, "--json"],
+          ["agent", "--agent", agentId, "--session-id", sessionId, "--message", message],
+          ["agent", "--session-id", sessionId, "--message", message, "--json"],
+          ["agent", "--session-id", sessionId, "--message", message],
+          ["agent", "--agent", agentId, "--message", message, "--json"],
+          ["agent", "--agent", agentId, "--message", message],
+        ]
+      : [
+          ["agent", "--agent", agentId, "--message", message, "--json"],
+          ["agent", "--agent", agentId, "--message", message],
+        ];
+
+    const cliFirst = await firstSuccessfulCli(attempts, 60000);
     if (!cliFirst.ok) {
       this.updateRun(runId, { status: "failed", error: cliFirst.error });
       throw new Error(`Chat failed: ${cliFirst.error}`);
@@ -437,7 +458,7 @@ export class OpenclawBridge {
     const text = extractChatText(cliFirst.payload);
     const meta = asObject(asObject(asObject(cliFirst.payload).result).meta);
     const agentMeta = asObject(meta.agentMeta);
-    const sessionId = typeof agentMeta.sessionId === "string" ? agentMeta.sessionId : undefined;
+    const runtimeSessionId = typeof agentMeta.sessionId === "string" ? agentMeta.sessionId : sessionId;
     this.updateRun(runId, {
       status: "completed",
       output: {
@@ -446,14 +467,14 @@ export class OpenclawBridge {
         source: cliFirst.source,
       },
     });
-    if (sessionId) {
-      const exists = this.state.sessions.some((session) => session.id === sessionId);
+    if (runtimeSessionId) {
+      const exists = this.state.sessions.some((session) => session.id === runtimeSessionId);
       if (!exists) {
         this.state = {
           ...this.state,
           sessions: [
             {
-              id: sessionId,
+              id: runtimeSessionId,
               key: `agent:${agentId}:main`,
               state: "active",
               agent: agentId,
@@ -479,7 +500,65 @@ export class OpenclawBridge {
       source: cliFirst.source,
       payload: cliFirst.payload,
       text,
+      sessionId: runtimeSessionId,
     };
+  }
+
+  async getSessionHistory(agentId: string, sessionId: string, limit = 200): Promise<BridgeChatMessage[]> {
+    const roots = [
+      process.env.OPENCLAW_HOME,
+      "/home/openclaw/.openclaw",
+      "/root/.openclaw",
+    ].filter(Boolean) as string[];
+
+    for (const root of roots) {
+      const transcriptPath = path.join(root, "agents", agentId, "sessions", `${sessionId}.jsonl`);
+      try {
+        const content = await readFile(transcriptPath, "utf8");
+        const lines = content
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean);
+        const messages: BridgeChatMessage[] = [];
+        for (const line of lines) {
+          try {
+            const row = asObject(JSON.parse(line));
+            const roleRaw = String(row.role ?? row.sender ?? row.type ?? "").toLowerCase();
+            const role: "user" | "agent" = roleRaw.includes("assistant") || roleRaw.includes("agent") ? "agent" : "user";
+            const text =
+              typeof row.text === "string"
+                ? row.text
+                : typeof row.message === "string"
+                  ? row.message
+                  : typeof row.content === "string"
+                    ? row.content
+                    : "";
+            if (!text.trim()) continue;
+            const at =
+              typeof row.timestamp === "string"
+                ? row.timestamp
+                : typeof row.createdAt === "string"
+                  ? row.createdAt
+                  : new Date().toISOString();
+            messages.push({
+              id: randomUUID(),
+              role,
+              text,
+              at,
+            });
+          } catch {
+            // skip malformed transcript line
+          }
+        }
+        if (messages.length > 0) {
+          return messages.slice(-Math.max(20, Math.min(500, limit)));
+        }
+      } catch {
+        // try next root
+      }
+    }
+
+    return [];
   }
 
   async createAgent(agent: { id: string; name: string; workspace?: string }) {

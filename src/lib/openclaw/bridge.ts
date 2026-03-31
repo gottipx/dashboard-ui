@@ -233,7 +233,22 @@ function extractResolvedModel(payload: unknown): string {
 }
 
 function parseChatTimestamp(row: Record<string, unknown>) {
-  const candidates = [row.timestamp, row.createdAt, row.updatedAt, row.at, row.time]
+  const meta = asObject(row.meta);
+  const result = asObject(row.result);
+  const candidates = [
+    row.timestamp,
+    row.createdAt,
+    row.updatedAt,
+    row.at,
+    row.time,
+    row.ts,
+    row.date,
+    meta.timestamp,
+    meta.createdAt,
+    result.timestamp,
+    result.createdAt,
+    result.updatedAt,
+  ]
     .filter((value) => typeof value === "string")
     .map((value) => String(value));
   for (const candidate of candidates) {
@@ -244,19 +259,108 @@ function parseChatTimestamp(row: Record<string, unknown>) {
 }
 
 function parseChatRole(row: Record<string, unknown>): "user" | "agent" {
-  const roleRaw = String(row.role ?? row.sender ?? row.type ?? row.kind ?? "").toLowerCase();
+  const result = asObject(row.result);
+  const output = asObject(row.output);
+  const response = asObject(row.response);
+  const payload = asObject(row.payload);
+  const params = asObject(row.params);
+  const input = asObject(row.input);
+  const request = asObject(row.request);
+  const roleRaw = String(
+    row.role ??
+      row.sender ??
+      row.type ??
+      row.kind ??
+      row.event ??
+      row.name ??
+      row.action ??
+      row.channel ??
+      row.source ??
+      row.direction ??
+      result.role ??
+      result.type ??
+      ""
+  ).toLowerCase();
   if (
     roleRaw.includes("assistant") ||
     roleRaw.includes("agent") ||
     roleRaw.includes("system") ||
-    roleRaw.includes("model")
+    roleRaw.includes("model") ||
+    roleRaw.includes("response") ||
+    roleRaw.includes("output") ||
+    roleRaw.includes("completion")
   ) {
     return "agent";
+  }
+  if (roleRaw.includes("user") || roleRaw.includes("human") || roleRaw.includes("input") || roleRaw.includes("prompt")) {
+    return "user";
+  }
+
+  if (
+    Array.isArray(row.payloads) ||
+    Array.isArray(result.payloads) ||
+    Array.isArray(output.payloads) ||
+    Array.isArray(response.payloads) ||
+    Array.isArray(payload.payloads) ||
+    typeof asObject(row.delta).text === "string" ||
+    typeof asObject(row.delta).content === "string" ||
+    typeof asObject(result.delta).text === "string" ||
+    typeof asObject(result.delta).content === "string"
+  ) {
+    return "agent";
+  }
+  if (
+    typeof params.message === "string" ||
+    typeof params.text === "string" ||
+    typeof params.prompt === "string" ||
+    typeof input.message === "string" ||
+    typeof input.text === "string" ||
+    typeof input.prompt === "string" ||
+    typeof request.message === "string" ||
+    typeof request.text === "string" ||
+    typeof request.prompt === "string" ||
+    typeof row.prompt === "string"
+  ) {
+    return "user";
   }
   return "user";
 }
 
+function extractTextFromPayloadRows(rows: unknown): string {
+  const items = Array.isArray(rows) ? rows : [];
+  const chunks = items
+    .map((entry) => asObject(entry))
+    .map((entry) => {
+      if (typeof entry.text === "string" && entry.text.trim()) return entry.text;
+      if (typeof entry.content === "string" && entry.content.trim()) return entry.content;
+      if (typeof entry.message === "string" && entry.message.trim()) return entry.message;
+      return "";
+    })
+    .filter((entry) => entry.trim().length > 0);
+  return chunks.join("\n").trim();
+}
+
+function extractChatTextStrict(payload: unknown): string {
+  const root = asObject(payload);
+  const direct = typeof root.text === "string" ? root.text : typeof root.content === "string" ? root.content : "";
+  if (direct.trim()) return direct.trim();
+  const result = asObject(root.result ?? root.payload ?? root.data ?? root.output ?? root.response ?? root);
+  const payloadText = extractTextFromPayloadRows(result.payloads);
+  if (payloadText) return payloadText;
+  if (typeof result.message === "string" && result.message.trim()) return result.message.trim();
+  return "";
+}
+
 function parseChatText(row: Record<string, unknown>): string {
+  const result = asObject(row.result);
+  const output = asObject(row.output);
+  const response = asObject(row.response);
+  const payload = asObject(row.payload);
+  const data = asObject(row.data);
+  const params = asObject(row.params);
+  const input = asObject(row.input);
+  const request = asObject(row.request);
+
   const direct =
     typeof row.text === "string"
       ? row.text
@@ -264,19 +368,62 @@ function parseChatText(row: Record<string, unknown>): string {
         ? row.message
         : typeof row.content === "string"
           ? row.content
-          : "";
+          : typeof row.prompt === "string"
+            ? row.prompt
+            : "";
   if (direct.trim()) return direct;
 
-  const payloads = Array.isArray(row.payloads) ? row.payloads : [];
-  const chunks = payloads
-    .map((entry) => asObject(entry))
-    .map((entry) => (typeof entry.text === "string" ? entry.text : typeof entry.content === "string" ? entry.content : ""))
-    .filter((entry) => entry.trim().length > 0);
-  if (chunks.length > 0) return chunks.join("\n");
+  const payloadText = [
+    extractTextFromPayloadRows(row.payloads),
+    extractTextFromPayloadRows(result.payloads),
+    extractTextFromPayloadRows(output.payloads),
+    extractTextFromPayloadRows(response.payloads),
+    extractTextFromPayloadRows(payload.payloads),
+    extractTextFromPayloadRows(data.payloads),
+  ].find((entry) => entry.length > 0);
+  if (payloadText) return payloadText;
 
-  const delta = asObject(row.delta);
-  if (typeof delta.text === "string" && delta.text.trim()) return delta.text;
-  if (typeof delta.content === "string" && delta.content.trim()) return delta.content;
+  const deltaCandidates = [row.delta, result.delta, output.delta, response.delta, payload.delta, data.delta];
+  for (const deltaValue of deltaCandidates) {
+    const delta = asObject(deltaValue);
+    if (typeof delta.text === "string" && delta.text.trim()) return delta.text;
+    if (typeof delta.content === "string" && delta.content.trim()) return delta.content;
+  }
+
+  const nestedCandidates = [
+    result.text,
+    result.content,
+    result.message,
+    output.text,
+    output.content,
+    output.message,
+    response.text,
+    response.content,
+    response.message,
+    payload.text,
+    payload.content,
+    payload.message,
+    data.text,
+    data.content,
+    data.message,
+    input.message,
+    input.text,
+    input.prompt,
+    params.message,
+    params.text,
+    params.prompt,
+    request.message,
+    request.text,
+    request.prompt,
+  ];
+  for (const candidate of nestedCandidates) {
+    if (typeof candidate === "string" && candidate.trim()) return candidate;
+  }
+
+  const strictResult = [extractChatTextStrict(result), extractChatTextStrict(output), extractChatTextStrict(response)].find(
+    (entry) => entry.length > 0
+  );
+  if (strictResult) return strictResult;
 
   return "";
 }
@@ -352,7 +499,9 @@ function extractChatMessagesFromPayload(payload: unknown): BridgeChatMessage[] {
     asObject(entry)
   );
   const deepRows = deepCollectArrays(payload, (row) =>
-    ["role", "sender", "type", "kind", "text", "message", "content", "delta", "payloads"].some((key) => key in row)
+    ["role", "sender", "type", "kind", "event", "text", "message", "content", "delta", "payloads", "result", "input", "params"].some(
+      (key) => key in row
+    )
   );
   const rows = [...arrayRows, ...deepRows];
   const dedupe = new Set<string>();

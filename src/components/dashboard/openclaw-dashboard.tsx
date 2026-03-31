@@ -2164,7 +2164,7 @@ export function OpenclawDashboard() {
   const runAgentChat = async () => {
     const agentId = gatewaySelectedAgent.trim();
     const message = gatewayChatMessage.trim();
-    const sessionId = gatewaySelectedSessionToken.trim();
+    const sessionId = (gatewaySelectedSession?.id || gatewaySelectedSessionToken).trim();
     if (!agentId) {
       setDashboardNotice({ type: "error", message: "Select an agent first." });
       return;
@@ -2251,6 +2251,16 @@ export function OpenclawDashboard() {
       setGatewayStreamingMessageId(null);
     } finally {
       setGatewayActionLoading(false);
+    }
+  };
+
+  const handleGatewayChatComposerKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== "Enter") return;
+    if (event.shiftKey) return;
+    if (event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    if (!gatewayActionLoading && gatewaySelectedSessionToken.trim()) {
+      void runAgentChat();
     }
   };
 
@@ -2608,12 +2618,14 @@ export function OpenclawDashboard() {
 
   const loadGatewaySessionHistory = async (force = false) => {
     const agentId = gatewaySelectedAgent.trim();
-    const sessionId = gatewaySelectedSessionToken.trim();
-    if (!agentId || !sessionId) {
+    const sessionTokenValue = gatewaySelectedSessionToken.trim();
+    const sessionId = (gatewaySelectedSession?.id || sessionTokenValue).trim();
+    const sessionKey = gatewaySelectedSession?.key?.trim();
+    if (!agentId || (!sessionId && !sessionKey)) {
       setGatewayChatMessages([]);
       return;
     }
-    const key = chatHistoryKey(agentId, sessionId);
+    const key = chatHistoryKey(agentId, sessionTokenValue || sessionId || sessionKey || "session");
     if (!force && chatHistoryCacheRef.current.has(key)) {
       setGatewayChatMessages(chatHistoryCacheRef.current.get(key) ?? []);
       return;
@@ -2623,7 +2635,8 @@ export function OpenclawDashboard() {
         action: "session-history",
         agentId,
         sessionId,
-        limit: 300,
+        sessionKey,
+        limit: 5000,
       });
       const messages: AgentChatMessage[] = (result.messages ?? []).map((entry, idx) => {
         const message: AgentChatMessage = {
@@ -4593,6 +4606,7 @@ export function OpenclawDashboard() {
                     <Textarea
                       value={gatewayChatMessage}
                       onChange={(event) => setGatewayChatMessage(event.target.value)}
+                      onKeyDown={handleGatewayChatComposerKeyDown}
                       placeholder="Write an instruction for the selected agent and session..."
                       className="min-h-[120px]"
                     />
@@ -4600,6 +4614,7 @@ export function OpenclawDashboard() {
                       <Button onClick={() => void runAgentChat()} disabled={gatewayActionLoading || !gatewaySelectedSessionToken}>
                         {gatewayActionLoading ? "Sending..." : "Send Message"}
                       </Button>
+                      <p className="text-xs text-muted-foreground">Enter to send, Shift+Enter for newline.</p>
                     </div>
                   </div>
                 </CardContent>

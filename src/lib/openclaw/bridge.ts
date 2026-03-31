@@ -232,6 +232,149 @@ function extractResolvedModel(payload: unknown): string {
   return "";
 }
 
+function parseChatTimestamp(row: Record<string, unknown>) {
+  const candidates = [row.timestamp, row.createdAt, row.updatedAt, row.at, row.time]
+    .filter((value) => typeof value === "string")
+    .map((value) => String(value));
+  for (const candidate of candidates) {
+    const d = new Date(candidate);
+    if (!Number.isNaN(d.getTime())) return d.toISOString();
+  }
+  return new Date().toISOString();
+}
+
+function parseChatRole(row: Record<string, unknown>): "user" | "agent" {
+  const roleRaw = String(row.role ?? row.sender ?? row.type ?? row.kind ?? "").toLowerCase();
+  if (
+    roleRaw.includes("assistant") ||
+    roleRaw.includes("agent") ||
+    roleRaw.includes("system") ||
+    roleRaw.includes("model")
+  ) {
+    return "agent";
+  }
+  return "user";
+}
+
+function parseChatText(row: Record<string, unknown>): string {
+  const direct =
+    typeof row.text === "string"
+      ? row.text
+      : typeof row.message === "string"
+        ? row.message
+        : typeof row.content === "string"
+          ? row.content
+          : "";
+  if (direct.trim()) return direct;
+
+  const payloads = Array.isArray(row.payloads) ? row.payloads : [];
+  const chunks = payloads
+    .map((entry) => asObject(entry))
+    .map((entry) => (typeof entry.text === "string" ? entry.text : typeof entry.content === "string" ? entry.content : ""))
+    .filter((entry) => entry.trim().length > 0);
+  if (chunks.length > 0) return chunks.join("\n");
+
+  const delta = asObject(row.delta);
+  if (typeof delta.text === "string" && delta.text.trim()) return delta.text;
+  if (typeof delta.content === "string" && delta.content.trim()) return delta.content;
+
+  return "";
+}
+
+function parseTranscriptContent(content: string): BridgeChatMessage[] {
+  const parsedRows: Record<string, unknown>[] = [];
+
+  const lines = content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  for (const line of lines) {
+    if (!line.startsWith("{") && !line.startsWith("[")) continue;
+    try {
+      const row = JSON.parse(line);
+      if (Array.isArray(row)) {
+        for (const entry of row) {
+          const obj = asObject(entry);
+          if (Object.keys(obj).length > 0) parsedRows.push(obj);
+        }
+      } else {
+        const obj = asObject(row);
+        if (Object.keys(obj).length > 0) parsedRows.push(obj);
+      }
+    } catch {
+      // ignore malformed lines
+    }
+  }
+
+  if (parsedRows.length === 0) {
+    try {
+      const root = JSON.parse(content);
+      if (Array.isArray(root)) {
+        for (const entry of root) {
+          const obj = asObject(entry);
+          if (Object.keys(obj).length > 0) parsedRows.push(obj);
+        }
+      } else {
+        const obj = asObject(root);
+        const collections = [obj.messages, obj.history, obj.events].filter((value) => Array.isArray(value)) as unknown[][];
+        if (collections.length > 0) {
+          for (const collection of collections) {
+            for (const entry of collection) {
+              const row = asObject(entry);
+              if (Object.keys(row).length > 0) parsedRows.push(row);
+            }
+          }
+        } else if (Object.keys(obj).length > 0) {
+          parsedRows.push(obj);
+        }
+      }
+    } catch {
+      // ignore non-json transcript
+    }
+  }
+
+  const messages: BridgeChatMessage[] = [];
+  for (const row of parsedRows) {
+    const text = parseChatText(row);
+    if (!text.trim()) continue;
+    messages.push({
+      id: randomUUID(),
+      role: parseChatRole(row),
+      text,
+      at: parseChatTimestamp(row),
+    });
+  }
+  return messages;
+}
+
+function extractChatMessagesFromPayload(payload: unknown): BridgeChatMessage[] {
+  const arrayRows = extractArrayShallow(payload, ["messages", "history", "events", "entries", "items", "payloads"]).map((entry) =>
+    asObject(entry)
+  );
+  const deepRows = deepCollectArrays(payload, (row) =>
+    ["role", "sender", "type", "kind", "text", "message", "content", "delta", "payloads"].some((key) => key in row)
+  );
+  const rows = [...arrayRows, ...deepRows];
+  const dedupe = new Set<string>();
+  const messages: BridgeChatMessage[] = [];
+  for (const row of rows) {
+    const text = parseChatText(row);
+    if (!text.trim()) continue;
+    const role = parseChatRole(row);
+    const at = parseChatTimestamp(row);
+    const signature = `${role}|${at}|${text.trim()}`;
+    if (dedupe.has(signature)) continue;
+    dedupe.add(signature);
+    messages.push({
+      id: randomUUID(),
+      role,
+      text,
+      at,
+    });
+  }
+  return messages;
+}
+
 export class OpenclawBridge {
   private state: BridgeState = {
     version: 0,
@@ -574,57 +717,186 @@ export class OpenclawBridge {
     };
   }
 
-  async getSessionHistory(agentId: string, sessionId: string, limit = 200): Promise<BridgeChatMessage[]> {
+  async getSessionHistory(agentId: string, sessionId: string, limit = 200, sessionKey?: string): Promise<BridgeChatMessage[]> {
+    const normalizedSessionId = sessionId.trim();
+    const normalizedSessionKey = sessionKey?.trim() || "";
+    const maxLimit = Math.max(20, Math.min(5000, limit));
+    const historyAttempts: string[][] = [];
+    if (normalizedSessionId) {
+      historyAttempts.push(
+        ["sessions", "history", "--session-id", normalizedSessionId, "--json"],
+        ["sessions", "history", "--session", normalizedSessionId, "--json"],
+        ["sessions", "history", "--id", normalizedSessionId, "--json"],
+        ["sessions", "history", normalizedSessionId, "--json"],
+        ["session", "history", "--session-id", normalizedSessionId, "--json"],
+        ["session", "history", normalizedSessionId, "--json"]
+      );
+    }
+    if (normalizedSessionKey) {
+      historyAttempts.push(
+        ["sessions", "history", "--session-key", normalizedSessionKey, "--json"],
+        ["sessions", "history", "--key", normalizedSessionKey, "--json"],
+        ["sessions", "history", normalizedSessionKey, "--json"],
+        ["session", "history", "--session-key", normalizedSessionKey, "--json"]
+      );
+    }
+    if (historyAttempts.length > 0) {
+      const cliHistory = await firstSuccessfulCli(historyAttempts, 45000);
+      if (cliHistory.ok) {
+        const cliMessages = extractChatMessagesFromPayload(cliHistory.payload);
+        if (cliMessages.length > 0) {
+          cliMessages.sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
+          return cliMessages.slice(-maxLimit);
+        }
+      }
+    }
+
     const roots = [
       process.env.OPENCLAW_HOME,
       "/home/openclaw/.openclaw",
       "/root/.openclaw",
     ].filter(Boolean) as string[];
+    const needles = [normalizedSessionId, normalizedSessionKey]
+      .map((entry) => entry.trim().toLowerCase())
+      .filter((entry) => entry.length > 0);
+
+    const normalizeCandidatePath = (value: unknown, sessionsDir: string) => {
+      if (typeof value !== "string") return "";
+      const trimmed = value.trim();
+      if (!trimmed) return "";
+      return path.isAbsolute(trimmed) ? trimmed : path.join(sessionsDir, trimmed);
+    };
 
     for (const root of roots) {
-      const transcriptPath = path.join(root, "agents", agentId, "sessions", `${sessionId}.jsonl`);
+      const sessionsDir = path.join(root, "agents", agentId, "sessions");
+      const candidates = new Set<string>();
+      const inlineMessages: BridgeChatMessage[] = [];
+
+      if (normalizedSessionId) {
+        candidates.add(path.join(sessionsDir, `${normalizedSessionId}.jsonl`));
+        candidates.add(path.join(sessionsDir, `${normalizedSessionId}.json`));
+      }
+      if (normalizedSessionKey) {
+        candidates.add(path.join(sessionsDir, `${normalizedSessionKey}.jsonl`));
+        candidates.add(path.join(sessionsDir, `${normalizedSessionKey}.json`));
+      }
+
       try {
-        const content = await readFile(transcriptPath, "utf8");
-        const lines = content
-          .split(/\r?\n/)
-          .map((line) => line.trim())
-          .filter(Boolean);
-        const messages: BridgeChatMessage[] = [];
-        for (const line of lines) {
-          try {
-            const row = asObject(JSON.parse(line));
-            const roleRaw = String(row.role ?? row.sender ?? row.type ?? "").toLowerCase();
-            const role: "user" | "agent" = roleRaw.includes("assistant") || roleRaw.includes("agent") ? "agent" : "user";
-            const text =
-              typeof row.text === "string"
-                ? row.text
-                : typeof row.message === "string"
-                  ? row.message
-                  : typeof row.content === "string"
-                    ? row.content
-                    : "";
-            if (!text.trim()) continue;
-            const at =
-              typeof row.timestamp === "string"
-                ? row.timestamp
-                : typeof row.createdAt === "string"
-                  ? row.createdAt
-                  : new Date().toISOString();
-            messages.push({
-              id: randomUUID(),
-              role,
-              text,
-              at,
-            });
-          } catch {
-            // skip malformed transcript line
+        const sessionsStorePath = path.join(sessionsDir, "sessions.json");
+        const rawStore = await readFile(sessionsStorePath, "utf8");
+        const parsedStore = asObject(JSON.parse(rawStore));
+        for (const [entryKey, entryValue] of Object.entries(parsedStore)) {
+          const row = asObject(entryValue);
+          const rowSessionId =
+            typeof row.sessionId === "string"
+              ? row.sessionId
+              : typeof row.id === "string"
+                ? row.id
+                : typeof row.session === "string"
+                  ? row.session
+                  : "";
+          const rowCandidates = [
+            entryKey,
+            rowSessionId,
+            typeof row.key === "string" ? row.key : "",
+            typeof row.name === "string" ? row.name : "",
+            typeof row.sessionKey === "string" ? row.sessionKey : "",
+          ]
+            .map((entry) => entry.trim().toLowerCase())
+            .filter((entry) => entry.length > 0);
+          const matches = needles.length === 0 || needles.some((needle) => rowCandidates.some((value) => value.includes(needle)));
+          if (!matches) continue;
+
+          const pathCandidates = [
+            row.path,
+            row.file,
+            row.filePath,
+            row.transcript,
+            row.transcriptPath,
+            row.historyPath,
+            row.eventsPath,
+            row.logPath,
+            row.outputPath,
+            row.messagesPath,
+          ];
+          for (const candidate of pathCandidates) {
+            const normalized = normalizeCandidatePath(candidate, sessionsDir);
+            if (normalized) candidates.add(normalized);
           }
-        }
-        if (messages.length > 0) {
-          return messages.slice(-Math.max(20, Math.min(500, limit)));
+          if (Array.isArray(row.files)) {
+            for (const candidate of row.files) {
+              const normalized = normalizeCandidatePath(candidate, sessionsDir);
+              if (normalized) candidates.add(normalized);
+            }
+          }
+
+          const inline = parseTranscriptContent(JSON.stringify(row));
+          if (inline.length > 0) inlineMessages.push(...inline);
         }
       } catch {
-        // try next root
+        // sessions index not available
+      }
+
+      const fileFallbackCandidates: string[] = [];
+      try {
+        const files = await readdir(sessionsDir, { withFileTypes: true });
+        for (const file of files) {
+          if (!file.isFile()) continue;
+          if (!file.name.endsWith(".jsonl") && !file.name.endsWith(".json")) continue;
+          const lowerName = file.name.toLowerCase();
+          const matchedByName = needles.length === 0 || needles.some((needle) => lowerName.includes(needle));
+          const fullPath = path.join(sessionsDir, file.name);
+          if (matchedByName) {
+            candidates.add(fullPath);
+          } else {
+            fileFallbackCandidates.push(fullPath);
+          }
+        }
+      } catch {
+        // sessions directory not available in this root
+      }
+
+      if (candidates.size === 0 && fileFallbackCandidates.length > 0 && needles.length > 0) {
+        for (const candidatePath of fileFallbackCandidates.slice(0, 120)) {
+          try {
+            const content = await readFile(candidatePath, "utf8");
+            const lowered = content.toLowerCase();
+            if (needles.some((needle) => lowered.includes(needle))) {
+              candidates.add(candidatePath);
+            }
+          } catch {
+            // ignore unreadable candidate
+          }
+        }
+      }
+
+      const aggregate: BridgeChatMessage[] = [];
+      if (inlineMessages.length > 0) {
+        aggregate.push(...inlineMessages);
+      }
+      for (const transcriptPath of candidates) {
+        try {
+          const content = await readFile(transcriptPath, "utf8");
+          const messages = parseTranscriptContent(content);
+          if (messages.length > 0) {
+            aggregate.push(...messages);
+          }
+        } catch {
+          // continue with other candidates
+        }
+      }
+
+      if (aggregate.length > 0) {
+        const dedupe = new Set<string>();
+        const normalized: BridgeChatMessage[] = [];
+        for (const message of aggregate) {
+          const signature = `${message.role}|${message.at}|${message.text.trim()}`;
+          if (dedupe.has(signature)) continue;
+          dedupe.add(signature);
+          normalized.push(message);
+        }
+        normalized.sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
+        return normalized.slice(-maxLimit);
       }
     }
 

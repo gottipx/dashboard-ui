@@ -84,11 +84,12 @@ export async function POST(request: Request) {
     if (body.action === "session-history") {
       const agentId = body.agentId?.trim();
       const sessionId = body.sessionId?.trim();
-      if (!agentId || !sessionId) {
+      const sessionKey = body.sessionKey?.trim();
+      if (!agentId || (!sessionId && !sessionKey)) {
         return NextResponse.json({ ok: true, messages: [] });
       }
-      const limit = Math.max(20, Math.min(500, Number(body.limit ?? 200)));
-      const messages = await openclawBridge.getSessionHistory(agentId, sessionId, limit);
+      const limit = Math.max(20, Math.min(5000, Number(body.limit ?? 1200)));
+      const messages = await openclawBridge.getSessionHistory(agentId, sessionId ?? "", limit, sessionKey);
       return NextResponse.json({ ok: true, messages });
     }
 

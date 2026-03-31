@@ -3,6 +3,16 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
+function sanitizeSecrets(input: string) {
+  return input
+    .replace(/(--token\s+)([^\s]+)/gi, "$1***")
+    .replace(/(--password\s+)([^\s]+)/gi, "$1***")
+    .replace(/(token=)([^\s&]+)/gi, "$1***")
+    .replace(/(password=)([^\s&]+)/gi, "$1***")
+    .replace(/("token"\s*:\s*")([^"]+)(")/gi, '$1***$3')
+    .replace(/("password"\s*:\s*")([^"]+)(")/gi, '$1***$3');
+}
+
 function resolveCliProcess(args: string[]) {
   const bin = process.env.OPENCLAW_GATEWAY_CLI_BIN || "openclaw";
   const prefix = process.env.OPENCLAW_GATEWAY_CLI_PREFIX?.trim();
@@ -38,10 +48,18 @@ function parseJsonFromStdout(stdout: string): unknown {
 
 export async function runOpenclawCliJson(args: string[], timeoutMs = 15000): Promise<unknown> {
   const processSpec = resolveCliProcess(args);
-  const { stdout } = await execFileAsync(processSpec.cmd, processSpec.cmdArgs, {
-    timeout: timeoutMs,
-    maxBuffer: 2 * 1024 * 1024,
-    env: process.env,
-  });
-  return parseJsonFromStdout(stdout);
+  try {
+    const { stdout } = await execFileAsync(processSpec.cmd, processSpec.cmdArgs, {
+      timeout: timeoutMs,
+      maxBuffer: 2 * 1024 * 1024,
+      env: process.env,
+    });
+    return parseJsonFromStdout(stdout);
+  } catch (error) {
+    const details =
+      typeof error === "object" && error !== null
+        ? String((error as { stderr?: string }).stderr ?? (error as { message?: string }).message ?? "OpenClaw CLI failed")
+        : String(error);
+    throw new Error(sanitizeSecrets(details.trim()));
+  }
 }

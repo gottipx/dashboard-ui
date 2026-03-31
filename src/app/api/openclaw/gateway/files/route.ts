@@ -3,6 +3,7 @@ import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { runOpenclawCliJson } from "@/lib/openclaw/cli";
+import { openclawBridge } from "@/lib/openclaw/bridge";
 
 export const runtime = "nodejs";
 
@@ -62,6 +63,14 @@ async function firstSuccessfulCli(attempts: string[][]) {
 async function discoverAgentWorkspace(agentId?: string) {
   if (!agentId?.trim()) return undefined;
   const needle = agentId.trim().toLowerCase();
+
+  const bridgeState = openclawBridge.snapshot();
+  const bridgeMatch = bridgeState.agents.find((agent) => {
+    const id = agent.id.toLowerCase();
+    const name = agent.name.toLowerCase();
+    return id === needle || name === needle;
+  });
+  if (bridgeMatch?.workspace) return bridgeMatch.workspace;
 
   const probes = [
     ["agents", "list", "--json"],

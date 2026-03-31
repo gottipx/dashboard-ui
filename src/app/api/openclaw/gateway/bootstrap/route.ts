@@ -1,72 +1,65 @@
 import { NextResponse } from "next/server";
 
-import { runOpenclawCliJson } from "@/lib/openclaw/cli";
+import { openclawBridge } from "@/lib/openclaw/bridge";
 
 export const runtime = "nodejs";
 
-function asObject(input: unknown): Record<string, unknown> {
-  return input && typeof input === "object" ? (input as Record<string, unknown>) : {};
-}
+type Body = {
+  force?: boolean;
+};
 
-function extractArray(payload: unknown, keys: string[]) {
-  const root = asObject(payload);
-  const obj = asObject(root.payload ?? root.data ?? payload);
-  for (const key of keys) {
-    const value = obj[key];
-    if (Array.isArray(value)) return value;
-  }
-  return [] as unknown[];
-}
-
-async function probeCli(argsOptions: string[][]) {
-  const errors: string[] = [];
-  for (const args of argsOptions) {
-    try {
-      return await runOpenclawCliJson(args, 12000);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      errors.push(`${args.join(" ")}: ${message.split("\n")[0]}`);
-    }
-  }
-  return { error: errors.join(" | ") };
-}
-
-export async function POST() {
+export async function POST(request: Request) {
   try {
-    const [status, nodes, sessions, agents] = await Promise.all([
-      probeCli([["status", "--json"], ["doctor", "--json"]]),
-      probeCli([["nodes", "status", "--json"], ["nodes", "list", "--json"], ["gateway", "call", "node.list", "--params", "{}"]]),
-      probeCli([["gateway", "call", "sessions.list", "--params", "{}"], ["sessions", "list", "--json"], ["session", "list", "--json"]]),
-      probeCli([["agents", "list", "--json"], ["agent", "list", "--json"], ["gateway", "call", "config.get", "--params", "{}"]]),
-    ]);
+    const body = (await request.json().catch(() => ({}))) as Body;
+    const force = Boolean(body.force);
+    const state = await openclawBridge.sync(force || !openclawBridge.snapshot().lastSyncAt);
 
-    const nodesItems = extractArray(nodes, ["items", "nodes"]);
-    const sessionsItems = extractArray(sessions, ["items", "sessions"]);
-    const agentItems = extractArray(agents, ["items", "agents", "list"]);
-    const statusObj = asObject(status);
-    const hasError = typeof statusObj.error === "string";
+    const connected = state.connected;
+    const healthState = connected ? (state.warnings.length > 0 ? "warning" : "healthy") : "warning";
 
     return NextResponse.json({
       ok: true,
       data: {
         connection: {
           transport: "cli",
-          target: process.env.OPENCLAW_GATEWAY_CLI_BIN || "openclaw",
+          target: state.connectionTarget,
           configuredByServer: true,
         },
-        status: status,
+        status: {
+          mode: "cli",
+          pairing: connected ? "ok" : "warning",
+          state: state.sourceStatus,
+          lastSyncAt: state.lastSyncAt,
+          warnings: state.warnings,
+          error: !connected ? state.warnings[0] ?? "OpenClaw CLI unavailable" : undefined,
+        },
         health: {
-          ok: !hasError,
-          state: hasError ? "warning" : "healthy",
+          ok: connected,
+          state: healthState,
         },
         presence: {
-          items: agentItems,
+          items: state.agents.map((agent) => ({
+            id: agent.id,
+            name: agent.name,
+            state: agent.state,
+            info: agent.info,
+            workspace: agent.workspace,
+          })),
         },
         nodes: {
-          items: nodesItems,
+          items: state.agents.map((agent) => ({
+            id: agent.id,
+            name: agent.name,
+            state: agent.state,
+            label: agent.info,
+            workspace: agent.workspace,
+          })),
         },
         sessions: {
-          items: sessionsItems,
+          items: state.sessions,
+        },
+        runs: {
+          items: state.runs.slice(0, 100),
         },
       },
     });

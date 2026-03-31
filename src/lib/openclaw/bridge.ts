@@ -315,16 +315,14 @@ export class OpenclawBridge {
 
       const [statusResult, agentsResult, nodesResult, sessionsResult] = await Promise.all([
         firstSuccessfulCli([["status", "--json"], ["doctor", "--json"]], 12000),
-        firstSuccessfulCli([["agents", "list", "--json"], ["agent", "list", "--json"], ["gateway", "call", "config.get", "--params", "{}"]], 12000),
-        firstSuccessfulCli([["nodes", "status", "--json"], ["nodes", "list", "--json"], ["gateway", "call", "node.list", "--params", "{}"]], 12000),
+        firstSuccessfulCli([["agents", "list", "--json"], ["agent", "list", "--json"]], 12000),
+        firstSuccessfulCli([["nodes", "status", "--json"], ["nodes", "list", "--json"]], 12000),
         firstSuccessfulCli(
           [
             ["sessions", "--all-agents", "--json"],
             ["sessions", "--json"],
             ["sessions", "list", "--json"],
             ["session", "list", "--json"],
-            ["gateway", "call", "sessions.list", "--params", "{}"],
-            ["gateway", "call", "session.list", "--params", "{}"],
           ],
           15000
         ),
@@ -431,9 +429,6 @@ export class OpenclawBridge {
     const cliFirst = await firstSuccessfulCli([
       ["agent", "--agent", agentId, "--message", message, "--json"],
       ["agent", "--agent", agentId, "--message", message],
-      ["gateway", "call", "agent.chat", "--params", JSON.stringify({ agentId, message })],
-      ["gateway", "call", "agent.message", "--params", JSON.stringify({ agentId, message })],
-      ["gateway", "call", "session.message", "--params", JSON.stringify({ agentId, message })],
     ], 60000);
     if (!cliFirst.ok) {
       this.updateRun(runId, { status: "failed", error: cliFirst.error });
@@ -493,12 +488,11 @@ export class OpenclawBridge {
     const workspace = agent.workspace?.trim();
     if (!id || !name) throw new Error("Agent id and name are required.");
 
-    const argsBase = ["--id", id, "--name", name, ...(workspace ? ["--workspace", workspace] : []), "--json"];
+    const argsBase = [id, ...(workspace ? ["--workspace", workspace] : []), "--json"];
     const result = await firstSuccessfulCli(
       [
         ["agents", "add", ...argsBase],
-        ["agent", "add", ...argsBase],
-        ["agent", "create", ...argsBase],
+        ["agents", "add", id, ...(workspace ? ["--workspace", workspace] : [])],
       ],
       30000
     );
@@ -513,29 +507,32 @@ export class OpenclawBridge {
     const title = String(input.title ?? input.name ?? kind);
     const runId = this.registerRun(kind, agentId, `${kind.toUpperCase()}: ${title}`, input);
     this.updateRun(runId, { status: "running" });
-    const payload = {
-      agentId,
-      agent: agentId,
-      nodeId: agentId,
-      task: input,
-      title,
-      description: String(input.description ?? ""),
-      project: String(input.project ?? ""),
-      priority: String(input.priority ?? "Medium"),
-      status: String(input.status ?? "Todo"),
-    };
-    const result = await firstSuccessfulCli([
-      ["gateway", "call", "task.create", "--params", JSON.stringify(payload)],
-      ["gateway", "call", "tasks.create", "--params", JSON.stringify(payload)],
-      ["gateway", "call", "agent.task", "--params", JSON.stringify(payload)],
-      ["gateway", "call", "agent.assign", "--params", JSON.stringify(payload)],
-      ["gateway", "call", "work.enqueue", "--params", JSON.stringify(payload)],
-    ], 60000);
+    const prompt = [
+      `You have a new ${kind} assignment from AgenticOS.`,
+      `Title: ${title}`,
+      `Description: ${String(input.description ?? "").trim() || "(none provided)"}`,
+      `Project: ${String(input.project ?? "").trim() || "(none)"}`,
+      `Priority: ${String(input.priority ?? "Medium")}`,
+      `Status: ${String(input.status ?? "Todo")}`,
+      "",
+      "Please acknowledge, provide a short execution plan, and start working on it now.",
+    ].join("\n");
+
+    const result = await firstSuccessfulCli(
+      [
+        ["agent", "--agent", agentId, "--message", prompt, "--json"],
+        ["agent", "--agent", agentId, "--message", prompt],
+      ],
+      60000
+    );
     if (!result.ok) {
       this.updateRun(runId, { status: "failed", error: result.error });
       throw new Error(`Delegation failed: ${result.error}`);
     }
-    this.updateRun(runId, { status: "completed", output: { source: result.source, payload: result.payload } });
+    this.updateRun(runId, {
+      status: "completed",
+      output: { source: result.source, payload: result.payload, text: extractChatText(result.payload) },
+    });
     return { runId, source: result.source, payload: result.payload };
   }
 }

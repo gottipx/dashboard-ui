@@ -49,6 +49,7 @@ import {
   Pin,
   PinOff,
   Plus,
+  RefreshCw,
   ShieldCheck,
   Siren,
   Sun,
@@ -201,13 +202,6 @@ type GatewaySessionEntry = {
   updatedAt?: string;
 };
 
-type GatewayFileEntry = {
-  path: string;
-  name: string;
-  type: "file" | "directory";
-  size?: number;
-};
-
 type OpenclawLogsResponse = {
   logs?: string[];
   source?: string;
@@ -225,6 +219,7 @@ type AgentChatMessage = {
 const AUTH_ENABLED = true;
 const ISSUE_TYPES: IssueType[] = ["Bug", "Story", "Task", "Epic", "Spike", "Incident", "Improvement", "Chore"];
 const PRIORITIES: Priority[] = ["Highest", "High", "Medium", "Low", "Lowest"];
+const CORE_AGENT_FILES = ["AGENTS.md", "BOOTSTRAP.md", "IDENTITY.md", "SOUL.md", "TOOLS.md", "USER.md"] as const;
 
 const navItems: NavItem[] = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
@@ -837,18 +832,15 @@ export function OpenclawDashboard() {
   const [gatewayAgentName, setGatewayAgentName] = useState("");
   const [gatewayAgentWorkspace, setGatewayAgentWorkspace] = useState("");
   const [createAgentDialogOpen, setCreateAgentDialogOpen] = useState(false);
-  const [gatewayDocPath, setGatewayDocPath] = useState("SOUL.md");
-  const [gatewayDocContent, setGatewayDocContent] = useState("");
-  const [gatewayWorkspacePath, setGatewayWorkspacePath] = useState(".");
-  const [gatewayFiles, setGatewayFiles] = useState<GatewayFileEntry[]>([]);
-  const [gatewayFilesLoading, setGatewayFilesLoading] = useState(false);
+  const [gatewayCoreFiles, setGatewayCoreFiles] = useState<Record<string, string>>({});
+  const [gatewayActiveCoreFile, setGatewayActiveCoreFile] = useState<(typeof CORE_AGENT_FILES)[number]>("AGENTS.md");
+  const [gatewayCoreFilesLoading, setGatewayCoreFilesLoading] = useState(false);
   const [gatewaySelectedAgent, setGatewaySelectedAgent] = useState("");
   const [gatewayChatMessage, setGatewayChatMessage] = useState("");
   const [gatewayChatMessages, setGatewayChatMessages] = useState<AgentChatMessage[]>([]);
   const [gatewayActionLoading, setGatewayActionLoading] = useState(false);
   const [openclawLogSource, setOpenclawLogSource] = useState<string>("");
   const [logRange, setLogRange] = useState<"all" | "12h">("all");
-  const [sessionsScope, setSessionsScope] = useState<"all" | "selected">("all");
   const [autoDispatchTasks, setAutoDispatchTasks] = useState(true);
 
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -876,7 +868,8 @@ export function OpenclawDashboard() {
   const toastCounterRef = useRef(0);
   const agentCacheRef = useRef<{ loaded: boolean; data: GatewayAgentEntry[] }>({ loaded: false, data: [] });
   const sessionCacheRef = useRef<Map<string, GatewaySessionEntry[]>>(new Map());
-  const filesCacheRef = useRef<Map<string, GatewayFileEntry[]>>(new Map());
+  const coreFilesCacheRef = useRef<Map<string, Record<string, string>>>(new Map());
+  const chatHistoryCacheRef = useRef<Map<string, AgentChatMessage[]>>(new Map());
 
   const [newTask, setNewTask] = useState({
     title: "",
@@ -1825,18 +1818,7 @@ export function OpenclawDashboard() {
       })),
     [gatewayAgents]
   );
-  const workspaceBreadcrumbs = useMemo(() => {
-    const normalized = gatewayWorkspacePath.trim() === "" ? "." : gatewayWorkspacePath.trim();
-    if (normalized === ".") return [{ label: ".", path: "." }];
-    const parts = normalized.split("/").filter(Boolean);
-    const crumbs = [{ label: ".", path: "." }];
-    let current = "";
-    for (const part of parts) {
-      current = current ? `${current}/${part}` : part;
-      crumbs.push({ label: part, path: current });
-    }
-    return crumbs;
-  }, [gatewayWorkspacePath]);
+  const gatewayActiveCoreContent = gatewayCoreFiles[gatewayActiveCoreFile] ?? "";
   const tagById = useMemo(() => new Map(tags.map((tag) => [tag.id, tag])), [tags]);
   const selectedAgent = agents.find((agent) => agent.name === selectedAgentName) ?? agents[0];
   const isSidebarExpanded = isSidebarPinned || isSidebarOpenedByButton;
@@ -2166,10 +2148,17 @@ export function OpenclawDashboard() {
       setDashboardNotice({ type: "error", message: "Enter a message first." });
       return;
     }
-    setGatewayChatMessages((prev) => [
-      ...prev,
-      { id: `u-${Date.now()}`, role: "user", text: message, at: new Date().toISOString() },
-    ]);
+    setGatewayChatMessages((prev) => {
+      const nextMessage: AgentChatMessage = {
+        id: `u-${Date.now()}`,
+        role: "user",
+        text: message,
+        at: new Date().toISOString(),
+      };
+      const next = [...prev, nextMessage];
+      chatHistoryCacheRef.current.set(agentId, next);
+      return next;
+    });
     setGatewayChatMessage("");
     setGatewayActionLoading(true);
     try {
@@ -2179,10 +2168,17 @@ export function OpenclawDashboard() {
         message,
       });
       const text = result.text || extractAgentReplyText(result.payload);
-      setGatewayChatMessages((prev) => [
-        ...prev,
-        { id: `a-${Date.now()}`, role: "agent", text, at: new Date().toISOString() },
-      ]);
+      setGatewayChatMessages((prev) => {
+        const nextMessage: AgentChatMessage = {
+          id: `a-${Date.now()}`,
+          role: "agent",
+          text,
+          at: new Date().toISOString(),
+        };
+        const next = [...prev, nextMessage];
+        chatHistoryCacheRef.current.set(agentId, next);
+        return next;
+      });
       setDashboardNotice({
         type: "success",
         message: `Message delivered to ${agentId}${result.source ? ` via ${result.source}` : ""}.`,
@@ -2265,10 +2261,10 @@ export function OpenclawDashboard() {
       }
       setGatewayStatus(statusLabel);
       setGatewayConnected(true);
-      await loadGatewayAgents(true);
-      await loadGatewaySessions(undefined, "all", true);
-      await loadGatewayFiles(".", true);
-      await loadAgentLogs(undefined, logRange, true);
+      const selectedAgent = await loadGatewayAgents(true);
+      await loadGatewaySessions(selectedAgent, "selected", true);
+      await loadGatewayCoreFiles(true, selectedAgent);
+      await loadAgentLogs(selectedAgent || undefined, logRange, true);
       setDashboardNotice({ type: "success", message: "OpenClaw CLI synced." });
     } catch (error) {
       setGatewayConnected(false);
@@ -2279,10 +2275,11 @@ export function OpenclawDashboard() {
     }
   };
 
-  const loadGatewayAgents = async (force = false) => {
+  const loadGatewayAgents = async (force = false): Promise<string> => {
     if (!force && agentCacheRef.current.loaded && agentCacheRef.current.data.length > 0) {
       setGatewayAgents(agentCacheRef.current.data);
-      return;
+      const first = agentCacheRef.current.data[0];
+      return gatewaySelectedAgent || first?.id || first?.name || "";
     }
     try {
       const result = await gatewayApi<{ agents: unknown[]; source?: string; warning?: string }>("/api/openclaw/gateway/agents", {
@@ -2318,6 +2315,9 @@ export function OpenclawDashboard() {
             logs: Array.isArray(row.logs) ? row.logs.map((item) => String(item)) : undefined,
           };
         });
+      if (result.warning) {
+        setGatewayStatus(result.warning);
+      }
       if (mapped.length > 0) {
         agentCacheRef.current = { loaded: true, data: mapped };
         setGatewayAgents(mapped);
@@ -2332,7 +2332,12 @@ export function OpenclawDashboard() {
         );
         const nextSelected = mapped.find((agent) => (agent.id || agent.name) === gatewaySelectedAgent) ?? mapped[0];
         setSelectedAgentName(nextSelected.name || nextSelected.id || "gateway-agent");
-        setGatewaySelectedAgent(nextSelected.id || nextSelected.name || "");
+        const nextValue = nextSelected.id || nextSelected.name || "";
+        setGatewaySelectedAgent(nextValue);
+        if (nextValue) {
+          setGatewayChatMessages(chatHistoryCacheRef.current.get(nextValue) ?? []);
+        }
+        return nextValue;
       } else if (gatewayNodes.length > 0) {
         setGatewayAgents(
           gatewayNodes.map((node, idx) => ({
@@ -2342,20 +2347,21 @@ export function OpenclawDashboard() {
             default: false,
           }))
         );
+        return gatewaySelectedAgent;
       } else {
         agentCacheRef.current = { loaded: true, data: [] };
         setGatewayAgents([]);
         setGatewaySelectedAgent("");
-      }
-      if (result.warning) {
-        setGatewayStatus(result.warning);
+        setGatewayChatMessages([]);
+        return "";
       }
     } catch (error) {
       setDashboardNotice({ type: "error", message: error instanceof Error ? error.message : "Loading agents failed" });
+      return gatewaySelectedAgent;
     }
   };
 
-  const loadGatewaySessions = async (agentId?: string, scope: "all" | "selected" = sessionsScope, force = false) => {
+  const loadGatewaySessions = async (agentId?: string, scope: "all" | "selected" = "selected", force = false) => {
     const cacheKey = `${scope}:${scope === "selected" ? agentId || "" : "all"}`;
     if (!force && sessionCacheRef.current.has(cacheKey)) {
       setGatewaySessions(sessionCacheRef.current.get(cacheKey) ?? []);
@@ -2440,44 +2446,39 @@ export function OpenclawDashboard() {
     }
   };
 
-  const loadGatewayFiles = async (pathOverride?: string, force = false) => {
-    const path = (pathOverride ?? gatewayWorkspacePath).trim() || ".";
-    const cacheKey = `${gatewaySelectedAgent || "none"}:${path}`;
-    if (!force && filesCacheRef.current.has(cacheKey)) {
-      setGatewayWorkspacePath(path);
-      setGatewayFiles(filesCacheRef.current.get(cacheKey) ?? []);
+  const loadGatewayCoreFiles = async (force = false, agentOverride?: string) => {
+    const agentId = (agentOverride ?? gatewaySelectedAgent).trim();
+    if (!agentId) {
+      setGatewayCoreFiles({});
       return;
     }
-    setGatewayFilesLoading(true);
-    try {
-      const result = await gatewayApi<{ entries?: GatewayFileEntry[]; path?: string }>("/api/openclaw/gateway/files", {
-        action: "list",
-        agentId: gatewaySelectedAgent || undefined,
-        path,
-      });
-      setGatewayWorkspacePath(result.path || path);
-      const entries = (result.entries ?? []) as GatewayFileEntry[];
-      filesCacheRef.current.set(cacheKey, entries);
-      setGatewayFiles(entries);
-    } catch (error) {
-      setDashboardNotice({ type: "error", message: error instanceof Error ? error.message : "Loading files failed" });
-    } finally {
-      setGatewayFilesLoading(false);
+    if (!force && coreFilesCacheRef.current.has(agentId)) {
+      setGatewayCoreFiles(coreFilesCacheRef.current.get(agentId) ?? {});
+      return;
     }
-  };
-
-  const openGatewayFile = async (path: string) => {
+    setGatewayCoreFilesLoading(true);
     try {
-      const result = await gatewayApi<{ content?: string }>("/api/openclaw/gateway/files", {
-        action: "read",
-        agentId: gatewaySelectedAgent || undefined,
-        path,
-      });
-      setGatewayDocPath(path);
-      setGatewayDocContent(result.content ?? "");
-      setDashboardNotice({ type: "success", message: `Loaded ${path}.` });
+      const entries = await Promise.all(
+        CORE_AGENT_FILES.map(async (fileName) => {
+          try {
+            const result = await gatewayApi<{ content?: string }>("/api/openclaw/gateway/files", {
+              action: "read",
+              agentId,
+              path: fileName,
+            });
+            return [fileName, result.content ?? ""] as const;
+          } catch {
+            return [fileName, ""] as const;
+          }
+        })
+      );
+      const next = Object.fromEntries(entries) as Record<string, string>;
+      coreFilesCacheRef.current.set(agentId, next);
+      setGatewayCoreFiles(next);
     } catch (error) {
-      setDashboardNotice({ type: "error", message: error instanceof Error ? error.message : "File read failed" });
+      setDashboardNotice({ type: "error", message: error instanceof Error ? error.message : "Loading core files failed" });
+    } finally {
+      setGatewayCoreFilesLoading(false);
     }
   };
 
@@ -2501,6 +2502,8 @@ export function OpenclawDashboard() {
       setGatewayAgentWorkspace("");
       setCreateAgentDialogOpen(false);
       agentCacheRef.current = { loaded: false, data: [] };
+      sessionCacheRef.current.clear();
+      coreFilesCacheRef.current.clear();
       await loadGatewayAgents(true);
       setDashboardNotice({ type: "success", message: "OpenClaw agent created." });
     } catch (error) {
@@ -2508,37 +2511,47 @@ export function OpenclawDashboard() {
     }
   };
 
-  const readGatewayDoc = async () => {
-    if (!gatewayDocPath.trim()) {
-      setDashboardNotice({ type: "error", message: "Set document path first." });
+  const reloadActiveGatewayCoreFile = async () => {
+    const agentId = gatewaySelectedAgent.trim();
+    const fileName = gatewayActiveCoreFile;
+    if (!agentId) {
+      setDashboardNotice({ type: "error", message: "Select an agent first." });
       return;
     }
+    setGatewayCoreFilesLoading(true);
     try {
       const result = await gatewayApi<{ content?: string }>("/api/openclaw/gateway/files", {
         action: "read",
-        path: gatewayDocPath.trim(),
-        agentId: gatewaySelectedAgent || undefined,
+        path: fileName,
+        agentId,
       });
-      setGatewayDocContent(result.content ?? "");
-      setDashboardNotice({ type: "success", message: `Loaded ${gatewayDocPath.trim()}.` });
+      const next = { ...gatewayCoreFiles, [fileName]: result.content ?? "" };
+      setGatewayCoreFiles(next);
+      coreFilesCacheRef.current.set(agentId, next);
+      setDashboardNotice({ type: "success", message: `Loaded ${fileName}.` });
     } catch (error) {
       setDashboardNotice({ type: "error", message: error instanceof Error ? error.message : "Document read failed" });
+    } finally {
+      setGatewayCoreFilesLoading(false);
     }
   };
 
-  const saveGatewayDoc = async () => {
-    if (!gatewayDocPath.trim()) {
-      setDashboardNotice({ type: "error", message: "Set document path first." });
+  const saveActiveGatewayCoreFile = async () => {
+    const agentId = gatewaySelectedAgent.trim();
+    const fileName = gatewayActiveCoreFile;
+    if (!agentId) {
+      setDashboardNotice({ type: "error", message: "Select an agent first." });
       return;
     }
     try {
       await gatewayApi<{ payload: unknown }>("/api/openclaw/gateway/files", {
         action: "write",
-        path: gatewayDocPath.trim(),
-        agentId: gatewaySelectedAgent || undefined,
-        content: gatewayDocContent,
+        path: fileName,
+        agentId,
+        content: gatewayCoreFiles[fileName] ?? "",
       });
-      setDashboardNotice({ type: "success", message: `Saved ${gatewayDocPath.trim()}.` });
+      coreFilesCacheRef.current.set(agentId, gatewayCoreFiles);
+      setDashboardNotice({ type: "success", message: `Saved ${fileName}.` });
     } catch (error) {
       setDashboardNotice({ type: "error", message: error instanceof Error ? error.message : "Document save failed" });
     }
@@ -2552,11 +2565,20 @@ export function OpenclawDashboard() {
 
   useEffect(() => {
     if (!gatewayConnected) return;
-    void loadGatewaySessions(gatewaySelectedAgent, sessionsScope);
+    void loadGatewaySessions(gatewaySelectedAgent, "selected");
     if (!gatewaySelectedAgent.trim()) return;
-    void loadGatewayFiles(".");
+    void loadGatewayCoreFiles();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gatewayConnected, gatewaySelectedAgent, sessionsScope]);
+  }, [gatewayConnected, gatewaySelectedAgent]);
+
+  useEffect(() => {
+    const key = gatewaySelectedAgent.trim();
+    if (!key) {
+      setGatewayChatMessages([]);
+      return;
+    }
+    setGatewayChatMessages(chatHistoryCacheRef.current.get(key) ?? []);
+  }, [gatewaySelectedAgent]);
 
   useEffect(() => {
     if (!gatewayConnected) return;
@@ -2600,6 +2622,12 @@ export function OpenclawDashboard() {
     setTags([]);
     setAgents([]);
     setCalendarEvents([]);
+    setGatewayCoreFiles({});
+    setGatewayChatMessages([]);
+    chatHistoryCacheRef.current.clear();
+    coreFilesCacheRef.current.clear();
+    sessionCacheRef.current.clear();
+    agentCacheRef.current = { loaded: false, data: [] };
     setHydrated(false);
   };
 
@@ -3996,9 +4024,41 @@ export function OpenclawDashboard() {
             <TabsContent value="agents" className="mt-0">
               <div className="space-y-3">
                 <Card>
-                  <CardHeader>
-                    <CardTitle>Agents Control</CardTitle>
-                    <CardDescription>Select an agent, inspect sessions, chat, and manage workspace files.</CardDescription>
+                  <CardHeader className="flex flex-row items-start justify-between space-y-0">
+                    <div className="space-y-1">
+                      <CardTitle>Agents Control</CardTitle>
+                      <CardDescription>CLI-managed runtime. Select an agent to view sessions, chat, and edit core files.</CardDescription>
+                    </div>
+                    <Dialog open={createAgentDialogOpen} onOpenChange={setCreateAgentDialogOpen}>
+                      <Button onClick={() => setCreateAgentDialogOpen(true)} className="gap-2">
+                        <Plus className="h-4 w-4" />
+                        Create Agent
+                      </Button>
+                      <DialogContent className="sm:max-w-lg">
+                        <DialogHeader>
+                          <DialogTitle>Create OpenClaw Agent</DialogTitle>
+                          <DialogDescription>Add a new agent id and optional workspace path.</DialogDescription>
+                        </DialogHeader>
+                        <div className="grid gap-2">
+                          <label className="text-xs font-medium">Agent ID</label>
+                          <Input value={gatewayAgentId} onChange={(event) => setGatewayAgentId(event.target.value)} placeholder="main" />
+                          <label className="text-xs font-medium">Agent Name</label>
+                          <Input value={gatewayAgentName} onChange={(event) => setGatewayAgentName(event.target.value)} placeholder="Main Agent" />
+                          <label className="text-xs font-medium">Workspace (optional)</label>
+                          <Input
+                            value={gatewayAgentWorkspace}
+                            onChange={(event) => setGatewayAgentWorkspace(event.target.value)}
+                            placeholder="/home/openclaw/.openclaw/workspace-main"
+                          />
+                        </div>
+                        <DialogFooter>
+                          <Button variant="outline" onClick={() => setCreateAgentDialogOpen(false)}>
+                            Cancel
+                          </Button>
+                          <Button onClick={() => void createGatewayAgent()}>Create</Button>
+                        </DialogFooter>
+                      </DialogContent>
+                    </Dialog>
                   </CardHeader>
                   <CardContent className="space-y-3">
                     <div className="flex flex-wrap items-center gap-3">
@@ -4013,51 +4073,21 @@ export function OpenclawDashboard() {
                       <Button onClick={() => void syncGatewayBootstrap()} disabled={gatewayLoading}>
                         {gatewayLoading ? "Syncing..." : "Sync OpenClaw"}
                       </Button>
-                      <Button variant="outline" onClick={() => void loadGatewayAgents(true)}>
-                        Reload Agents
-                      </Button>
-                      <Button variant="outline" onClick={() => void loadGatewaySessions(gatewaySelectedAgent, sessionsScope, true)}>
-                        Reload Sessions
-                      </Button>
-                      <Button variant="outline" onClick={() => void loadAgentLogs(gatewaySelectedAgent, logRange, true)}>
-                        Reload Logs
-                      </Button>
-                      <Dialog open={createAgentDialogOpen} onOpenChange={setCreateAgentDialogOpen}>
-                        <Button onClick={() => setCreateAgentDialogOpen(true)}>Create Agent</Button>
-                        <DialogContent className="sm:max-w-lg">
-                          <DialogHeader>
-                            <DialogTitle>Create OpenClaw Agent</DialogTitle>
-                            <DialogDescription>Add a new agent with id, name, and optional workspace path.</DialogDescription>
-                          </DialogHeader>
-                          <div className="grid gap-2">
-                            <label className="text-xs font-medium">Agent ID</label>
-                            <Input value={gatewayAgentId} onChange={(event) => setGatewayAgentId(event.target.value)} placeholder="main" />
-                            <label className="text-xs font-medium">Agent Name</label>
-                            <Input value={gatewayAgentName} onChange={(event) => setGatewayAgentName(event.target.value)} placeholder="Main Agent" />
-                            <label className="text-xs font-medium">Workspace (optional)</label>
-                            <Input
-                              value={gatewayAgentWorkspace}
-                              onChange={(event) => setGatewayAgentWorkspace(event.target.value)}
-                              placeholder="/home/openclaw/.openclaw/agents/main"
-                            />
-                          </div>
-                          <DialogFooter>
-                            <Button variant="outline" onClick={() => setCreateAgentDialogOpen(false)}>
-                              Cancel
-                            </Button>
-                            <Button onClick={() => void createGatewayAgent()}>Create</Button>
-                          </DialogFooter>
-                        </DialogContent>
-                      </Dialog>
+                      <span className="text-xs text-muted-foreground">Target: {gatewayTarget}</span>
                     </div>
                   </CardContent>
                 </Card>
 
                 <div className="grid gap-3 lg:grid-cols-[320px_1fr]">
                   <Card>
-                    <CardHeader>
-                      <CardTitle>Agents</CardTitle>
-                      <CardDescription>Runtime-discovered agent list from OpenClaw CLI.</CardDescription>
+                    <CardHeader className="flex flex-row items-start justify-between space-y-0">
+                      <div className="space-y-1">
+                        <CardTitle>Agents</CardTitle>
+                        <CardDescription>Runtime-discovered agent list from OpenClaw CLI.</CardDescription>
+                      </div>
+                      <Button size="icon" variant="ghost" onClick={() => void loadGatewayAgents(true)} aria-label="Reload agents">
+                        <RefreshCw className="h-4 w-4" />
+                      </Button>
                     </CardHeader>
                     <CardContent className="space-y-2">
                       <div className="space-y-1.5">
@@ -4085,29 +4115,23 @@ export function OpenclawDashboard() {
                   </Card>
 
                   <Card>
-                    <CardHeader>
-                      <CardTitle>Sessions</CardTitle>
-                      <CardDescription>All active sessions from OpenClaw runtime.</CardDescription>
+                    <CardHeader className="flex flex-row items-start justify-between space-y-0">
+                      <div className="space-y-1">
+                        <CardTitle>Sessions</CardTitle>
+                        <CardDescription>Bound to the selected agent by default.</CardDescription>
+                      </div>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        onClick={() => void loadGatewaySessions(gatewaySelectedAgent, "selected", true)}
+                        aria-label="Reload sessions"
+                      >
+                        <RefreshCw className="h-4 w-4" />
+                      </Button>
                     </CardHeader>
                     <CardContent className="space-y-2 text-sm">
-                      <div className="flex flex-wrap gap-2">
-                        <Button
-                          size="sm"
-                          variant={sessionsScope === "all" ? "default" : "outline"}
-                          onClick={() => setSessionsScope("all")}
-                        >
-                          All Sessions
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant={sessionsScope === "selected" ? "default" : "outline"}
-                          onClick={() => setSessionsScope("selected")}
-                        >
-                          Selected Agent
-                        </Button>
-                      </div>
                       {gatewaySessions.length === 0 && <p className="text-muted-foreground">No sessions loaded yet.</p>}
-                      <ScrollArea className="h-[300px] rounded-md border p-2">
+                      <ScrollArea className="h-[180px] rounded-md border p-2">
                         <div className="space-y-1">
                           {gatewaySessions.map((session, idx) => (
                             <div key={`${session.id || session.key || idx}`} className="rounded-md border p-2">
@@ -4126,27 +4150,30 @@ export function OpenclawDashboard() {
                   </Card>
                 </div>
 
-                <div className="grid gap-3 xl:grid-cols-[360px_1fr]">
+                <div className="grid gap-3 xl:grid-cols-[1.25fr_1fr]">
                   <Card>
                     <CardHeader>
                       <CardTitle>Agent Chat</CardTitle>
-                      <CardDescription>Direct message stream for the selected agent.</CardDescription>
+                      <CardDescription>Persistent per-agent history for this dashboard session.</CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-2">
                       <p className="text-xs text-muted-foreground">Agent: {gatewaySelectedAgent || "not selected"}</p>
-                      <ScrollArea className="h-48 rounded-lg border bg-zinc-950 p-2 text-xs text-zinc-200">
+                      <ScrollArea className="h-[420px] rounded-lg border bg-zinc-950 p-3 text-xs text-zinc-200">
                         <div className="space-y-2">
                           {gatewayChatMessages.length === 0 && <p className="text-zinc-400">No messages yet.</p>}
                           {gatewayChatMessages.map((message) => (
                             <div
                               key={message.id}
                               className={cn(
-                                "rounded-md px-2 py-1",
+                                "rounded-md px-2 py-2",
                                 message.role === "user" ? "bg-sky-900/40 text-sky-100" : "bg-zinc-800 text-zinc-100"
                               )}
                             >
-                              <p className="mb-1 text-[10px] uppercase text-zinc-400">{message.role}</p>
-                              <p className="whitespace-pre-wrap">{message.text}</p>
+                              <div className="mb-1 flex items-center justify-between text-[10px] uppercase text-zinc-400">
+                                <span>{message.role}</span>
+                                <span>{format(new Date(message.at), "HH:mm:ss")}</span>
+                              </div>
+                              <p className="whitespace-pre-wrap text-sm">{message.text}</p>
                             </div>
                           ))}
                         </div>
@@ -4155,103 +4182,76 @@ export function OpenclawDashboard() {
                         <Textarea
                           value={gatewayChatMessage}
                           onChange={(event) => setGatewayChatMessage(event.target.value)}
-                          placeholder="Write a task or instruction..."
-                          className="min-h-[96px]"
+                          placeholder="Write an instruction for the selected agent..."
+                          className="min-h-[120px]"
                         />
                         <div className="flex items-center gap-2">
                           <Button onClick={() => void runAgentChat()} disabled={gatewayActionLoading}>
-                            {gatewayActionLoading ? "Sending..." : "Send"}
+                            {gatewayActionLoading ? "Sending..." : "Send Message"}
                           </Button>
-                          <p className="text-xs text-muted-foreground">Target via CLI: {gatewayTarget}</p>
                         </div>
                       </div>
                     </CardContent>
                   </Card>
 
                   <Card>
-                    <CardHeader>
-                      <CardTitle>Agent Workspace Files</CardTitle>
-                      <CardDescription>Browse and edit the selected agent workspace directory.</CardDescription>
+                    <CardHeader className="flex flex-row items-start justify-between space-y-0">
+                      <div className="space-y-1">
+                        <CardTitle>Agent Core Files</CardTitle>
+                        <CardDescription>Only core workspace docs are editable here.</CardDescription>
+                      </div>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        onClick={() => void loadGatewayCoreFiles(true)}
+                        aria-label="Reload core files"
+                        disabled={gatewayCoreFilesLoading || !gatewaySelectedAgent}
+                      >
+                        <RefreshCw className="h-4 w-4" />
+                      </Button>
                     </CardHeader>
                     <CardContent className="space-y-3">
-                      <div className="flex flex-wrap gap-2">
-                        <Input
-                          value={gatewayWorkspacePath}
-                          onChange={(event) => setGatewayWorkspacePath(event.target.value)}
-                          placeholder="Workspace path (.)"
-                          className="max-w-sm"
-                        />
-                        <Button variant="outline" onClick={() => void loadGatewayFiles(gatewayWorkspacePath, true)} disabled={gatewayFilesLoading}>
-                          {gatewayFilesLoading ? "Loading..." : "Open Folder"}
-                        </Button>
-                      </div>
-
-                      <div className="grid gap-3 lg:grid-cols-[300px_1fr]">
-                        <div className="space-y-2">
-                          <div className="flex flex-wrap items-center gap-1 text-xs">
-                            {workspaceBreadcrumbs.map((crumb, idx) => (
-                              <span key={crumb.path} className="inline-flex items-center gap-1">
-                                {idx > 0 && <span className="text-muted-foreground">/</span>}
-                                <button
-                                  type="button"
-                                  className="rounded px-1 py-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
-                                  onClick={() => void loadGatewayFiles(crumb.path, true)}
-                                >
-                                  {crumb.label}
-                                </button>
-                              </span>
-                            ))}
-                          </div>
-                          <ScrollArea className="h-[340px] rounded-lg border p-2">
-                            <div className="space-y-1">
-                              {gatewayFiles.length === 0 && (
-                                <p className="px-1 py-1 text-xs text-muted-foreground">No entries found in this folder.</p>
-                              )}
-                              {gatewayFiles.map((entry) => (
-                                <button
-                                  key={entry.path}
-                                  type="button"
-                                  className={cn(
-                                    "flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs transition",
-                                    gatewayDocPath === entry.path ? "bg-primary/10" : "hover:bg-muted/40"
-                                  )}
-                                  onClick={() => {
-                                    if (entry.type === "directory") {
-                                      void loadGatewayFiles(entry.path, true);
-                                    } else {
-                                      void openGatewayFile(entry.path);
-                                    }
-                                  }}
-                                >
-                                  <span className="truncate">{entry.type === "directory" ? "[DIR]" : "[FILE]"} {entry.name}</span>
-                                  <span className="text-muted-foreground">{entry.type === "directory" ? "dir" : "file"}</span>
-                                </button>
-                              ))}
-                            </div>
-                          </ScrollArea>
-                        </div>
-
-                        <div className="space-y-2">
-                          <div className="flex items-center justify-between gap-2">
-                            <Input
-                              value={gatewayDocPath}
-                              onChange={(event) => setGatewayDocPath(event.target.value)}
-                              placeholder="Selected file path"
-                              className="font-mono text-xs"
-                            />
-                            <Button variant="outline" onClick={() => void readGatewayDoc()}>
-                              Reload File
-                            </Button>
-                            <Button onClick={() => void saveGatewayDoc()}>Save File</Button>
-                          </div>
-                          <Textarea
-                            value={gatewayDocContent}
-                            onChange={(event) => setGatewayDocContent(event.target.value)}
-                            className="min-h-[340px] font-mono text-xs"
-                            placeholder="File content..."
-                          />
+                      <Tabs
+                        value={gatewayActiveCoreFile}
+                        onValueChange={(value) => setGatewayActiveCoreFile(value as (typeof CORE_AGENT_FILES)[number])}
+                      >
+                        <TabsList className="h-auto w-full flex-wrap justify-start gap-1 bg-muted/35 p-1">
+                          {CORE_AGENT_FILES.map((fileName) => (
+                            <TabsTrigger key={fileName} value={fileName} className="h-8 text-xs">
+                              {fileName.replace(".md", "")}
+                            </TabsTrigger>
+                          ))}
+                        </TabsList>
+                      </Tabs>
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-xs text-muted-foreground">
+                          {gatewaySelectedAgent ? `Editing ${gatewayActiveCoreFile}` : "Select an agent to load files"}
+                        </p>
+                        <div className="flex gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => void reloadActiveGatewayCoreFile()}
+                            disabled={!gatewaySelectedAgent || gatewayCoreFilesLoading}
+                          >
+                            Reload
+                          </Button>
+                          <Button size="sm" onClick={() => void saveActiveGatewayCoreFile()} disabled={!gatewaySelectedAgent}>
+                            Save
+                          </Button>
                         </div>
                       </div>
+                      <Textarea
+                        value={gatewayActiveCoreContent}
+                        onChange={(event) =>
+                          setGatewayCoreFiles((prev) => ({
+                            ...prev,
+                            [gatewayActiveCoreFile]: event.target.value,
+                          }))
+                        }
+                        className="min-h-[420px] font-mono text-xs"
+                        placeholder="Core file content..."
+                      />
                     </CardContent>
                   </Card>
                 </div>

@@ -5,11 +5,21 @@ import { openclawBridge } from "@/lib/openclaw/bridge";
 export const runtime = "nodejs";
 
 type Body = {
-  action?: "sessions" | "chat" | "dispatch-task" | "session-history";
+  action?:
+    | "sessions"
+    | "chat"
+    | "dispatch-task"
+    | "session-history"
+    | "delete-session"
+    | "models-list"
+    | "model-status"
+    | "model-set-agent-default";
   force?: boolean;
   agentId?: string;
   sessionId?: string;
+  sessionKey?: string;
   limit?: number;
+  model?: string;
   message?: string;
   kind?: "task" | "issue" | "project";
   task?: {
@@ -80,6 +90,38 @@ export async function POST(request: Request) {
       const limit = Math.max(20, Math.min(500, Number(body.limit ?? 200)));
       const messages = await openclawBridge.getSessionHistory(agentId, sessionId, limit);
       return NextResponse.json({ ok: true, messages });
+    }
+
+    if (body.action === "delete-session") {
+      const agentId = body.agentId?.trim();
+      const sessionId = body.sessionId?.trim();
+      const sessionKey = body.sessionKey?.trim();
+      if (!agentId || !sessionId) {
+        return NextResponse.json({ ok: false, error: "Agent and session are required." }, { status: 400 });
+      }
+      const result = await openclawBridge.deleteSession(agentId, sessionId, sessionKey);
+      return NextResponse.json({ ok: true, ...result });
+    }
+
+    if (body.action === "models-list") {
+      const result = await openclawBridge.listModels();
+      return NextResponse.json({ ok: true, models: result.models, source: result.source });
+    }
+
+    if (body.action === "model-status") {
+      const agentId = body.agentId?.trim();
+      const result = await openclawBridge.getModelStatus(agentId);
+      return NextResponse.json({ ok: true, model: result.model, source: result.source, payload: result.payload });
+    }
+
+    if (body.action === "model-set-agent-default") {
+      const agentId = body.agentId?.trim();
+      const model = body.model?.trim();
+      if (!agentId || !model) {
+        return NextResponse.json({ ok: false, error: "Agent and model are required." }, { status: 400 });
+      }
+      const result = await openclawBridge.setAgentDefaultModel(agentId, model);
+      return NextResponse.json({ ok: true, source: result.source });
     }
 
     if (body.action === "dispatch-task") {

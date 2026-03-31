@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { runOpenclawCliJson } from "@/lib/openclaw/cli";
@@ -160,6 +160,76 @@ function extractChatText(payload: unknown) {
     if (typeof row.content === "string" && row.content.trim()) return row.content;
   }
   return JSON.stringify(payload ?? {}, null, 2);
+}
+
+function extractModelsFromPayload(payload: unknown): string[] {
+  const queue: unknown[] = [payload];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current) continue;
+    if (typeof current === "string") {
+      const matches = current.match(/[a-z0-9._-]+\/[a-z0-9._-]+/gi) ?? [];
+      for (const match of matches) {
+        if (!seen.has(match)) {
+          seen.add(match);
+          out.push(match);
+        }
+      }
+      continue;
+    }
+    if (Array.isArray(current)) {
+      for (const item of current) queue.push(item);
+      continue;
+    }
+    if (typeof current === "object") {
+      const row = asObject(current);
+      const candidates = [row.model, row.id, row.ref, row.name, row.alias]
+        .filter((entry) => typeof entry === "string")
+        .map((entry) => String(entry).trim())
+        .filter((entry) => entry.includes("/"));
+      for (const model of candidates) {
+        if (!seen.has(model)) {
+          seen.add(model);
+          out.push(model);
+        }
+      }
+      for (const value of Object.values(row)) queue.push(value);
+    }
+  }
+  return out;
+}
+
+function extractResolvedModel(payload: unknown): string {
+  const queue: unknown[] = [payload];
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current) continue;
+    if (typeof current === "string") {
+      const match = current.match(/[a-z0-9._-]+\/[a-z0-9._-]+/i);
+      if (match) return match[0];
+      continue;
+    }
+    if (Array.isArray(current)) {
+      for (const item of current) queue.push(item);
+      continue;
+    }
+    if (typeof current === "object") {
+      const row = asObject(current);
+      const direct =
+        typeof row.primary === "string"
+          ? row.primary
+          : typeof row.model === "string"
+            ? row.model
+            : typeof row.default === "string"
+              ? row.default
+              : "";
+      if (direct.includes("/")) return direct;
+      for (const value of Object.values(row)) queue.push(value);
+    }
+  }
+  return "";
 }
 
 export class OpenclawBridge {
@@ -559,6 +629,100 @@ export class OpenclawBridge {
     }
 
     return [];
+  }
+
+  async deleteSession(agentId: string, sessionId: string, sessionKey?: string) {
+    const roots = [process.env.OPENCLAW_HOME, "/home/openclaw/.openclaw", "/root/.openclaw"].filter(Boolean) as string[];
+    let removed = 0;
+    let removedTranscripts = 0;
+    let storePath = "";
+    for (const root of roots) {
+      const sessionsDir = path.join(root, "agents", agentId, "sessions");
+      const currentStorePath = path.join(sessionsDir, "sessions.json");
+      try {
+        const raw = await readFile(currentStorePath, "utf8");
+        const parsed = asObject(JSON.parse(raw));
+        const next: Record<string, unknown> = {};
+        let changed = false;
+        for (const [key, value] of Object.entries(parsed)) {
+          const row = asObject(value);
+          const rowSessionId = typeof row.sessionId === "string" ? row.sessionId : typeof row.id === "string" ? row.id : "";
+          const shouldDelete = key === sessionKey || rowSessionId === sessionId;
+          if (shouldDelete) {
+            changed = true;
+            removed += 1;
+            continue;
+          }
+          next[key] = value;
+        }
+        if (changed) {
+          await writeFile(currentStorePath, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+          storePath = currentStorePath;
+        }
+        const files = await readdir(sessionsDir, { withFileTypes: true });
+        for (const file of files) {
+          if (!file.isFile()) continue;
+          if (!file.name.endsWith(".jsonl")) continue;
+          if (!file.name.startsWith(sessionId)) continue;
+          await unlink(path.join(sessionsDir, file.name));
+          removedTranscripts += 1;
+        }
+      } catch {
+        // try next root
+      }
+    }
+    this.state = {
+      ...this.state,
+      sessions: this.state.sessions.filter((entry) => entry.id !== sessionId && entry.key !== sessionKey),
+    };
+    this.publish();
+    return { removed, removedTranscripts, storePath };
+  }
+
+  async listModels() {
+    const result = await firstSuccessfulCli(
+      [
+        ["models", "list", "--json"],
+        ["models", "list", "--all", "--json"],
+      ],
+      20000
+    );
+    if (!result.ok) throw new Error(result.error || "Unable to list models.");
+    return { models: extractModelsFromPayload(result.payload), source: result.source };
+  }
+
+  async getModelStatus(agentId?: string) {
+    const args = ["models", "status", "--json", ...(agentId ? ["--agent", agentId] : [])];
+    const result = await firstSuccessfulCli([args], 20000);
+    if (!result.ok) throw new Error(result.error || "Unable to get model status.");
+    return {
+      model: extractResolvedModel(result.payload),
+      source: result.source,
+      payload: result.payload,
+    };
+  }
+
+  async setAgentDefaultModel(agentId: string, model: string) {
+    const listResult = await firstSuccessfulCli([["config", "get", "agents.list", "--json"]], 20000);
+    if (!listResult.ok) throw new Error(listResult.error || "Unable to read agents list from config.");
+    const rows = extractArrayShallow(listResult.payload, ["items", "agents", "list"]);
+    const index = rows.findIndex((entry) => {
+      const row = asObject(entry);
+      const id = typeof row.id === "string" ? row.id : "";
+      const name = typeof row.name === "string" ? row.name : "";
+      return id.toLowerCase() === agentId.toLowerCase() || name.toLowerCase() === agentId.toLowerCase();
+    });
+    if (index < 0) throw new Error(`Agent ${agentId} not found in config agents.list.`);
+
+    const setResult = await firstSuccessfulCli(
+      [
+        ["config", "set", `agents.list[${index}].model.primary`, model],
+        ["config", "set", `agents.list[${index}].model`, model],
+      ],
+      20000
+    );
+    if (!setResult.ok) throw new Error(setResult.error || "Unable to set agent model.");
+    return { source: setResult.source };
   }
 
   async createAgent(agent: { id: string; name: string; workspace?: string }) {

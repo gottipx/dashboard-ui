@@ -55,6 +55,7 @@ import {
   Siren,
   Sun,
   TerminalSquare,
+  Trash2,
   Wifi,
 } from "lucide-react";
 
@@ -851,6 +852,10 @@ export function OpenclawDashboard() {
   const [gatewayChatMessages, setGatewayChatMessages] = useState<AgentChatMessage[]>([]);
   const [gatewayStreamingMessageId, setGatewayStreamingMessageId] = useState<string | null>(null);
   const [gatewayActionLoading, setGatewayActionLoading] = useState(false);
+  const [gatewayModels, setGatewayModels] = useState<string[]>([]);
+  const [gatewaySelectedChatModel, setGatewaySelectedChatModel] = useState("");
+  const [gatewayAgentDefaultModel, setGatewayAgentDefaultModel] = useState("");
+  const [gatewayModelStatus, setGatewayModelStatus] = useState("");
   const [openclawLogSource, setOpenclawLogSource] = useState<string>("");
   const [logRange, setLogRange] = useState<"all" | "2h">("2h");
   const [autoDispatchTasks, setAutoDispatchTasks] = useState(true);
@@ -2187,6 +2192,16 @@ export function OpenclawDashboard() {
     setGatewayChatMessage("");
     setGatewayActionLoading(true);
     try {
+      const chosenModel = gatewaySelectedChatModel.trim();
+      if (chosenModel && chosenModel !== gatewayModelStatus) {
+        await runAgentAction({
+          action: "chat",
+          agentId,
+          sessionId,
+          message: `/model ${chosenModel}`,
+        });
+        setGatewayModelStatus(chosenModel);
+      }
       const result = await runAgentAction<{ source?: string; payload?: unknown; text?: string; sessionId?: string }>({
         action: "chat",
         agentId,
@@ -2312,6 +2327,8 @@ export function OpenclawDashboard() {
       setGatewayConnected(true);
       const selectedAgent = await loadGatewayAgents(true);
       await loadGatewaySessions(selectedAgent, "selected", true);
+      await loadGatewayModels();
+      await loadGatewayModelStatus(selectedAgent);
       await loadGatewayCoreFiles(true, selectedAgent);
       await loadAgentLogs(selectedAgent || undefined, logRange, true);
       setDashboardNotice({ type: "success", message: "OpenClaw CLI synced." });
@@ -2502,6 +2519,93 @@ export function OpenclawDashboard() {
     setGatewayChatMessages([]);
   };
 
+  const deleteGatewaySession = async (session: GatewaySessionEntry, index: number) => {
+    const agentId = (gatewaySelectedAgent || session.agent || "").trim();
+    const sessionId = (session.id || "").trim();
+    if (!agentId || !sessionId) {
+      setDashboardNotice({ type: "error", message: "Cannot delete session: missing agent or session id." });
+      return;
+    }
+    try {
+      await runAgentAction({
+        action: "delete-session",
+        agentId,
+        sessionId,
+        sessionKey: session.key,
+      });
+      setGatewaySessions((prev) => {
+        const next = prev.filter((entry) => sessionToken(entry, prev.indexOf(entry)) !== sessionToken(session, index));
+        sessionCacheRef.current.set(`selected:${agentId}`, next);
+        return next;
+      });
+      const token = sessionToken(session, index);
+      if (token === gatewaySelectedSessionId) {
+        setGatewaySelectedSessionId("");
+      }
+      setDashboardNotice({ type: "success", message: "Session deleted." });
+    } catch (error) {
+      setDashboardNotice({ type: "error", message: error instanceof Error ? error.message : "Deleting session failed" });
+    }
+  };
+
+  const loadGatewayModels = async () => {
+    try {
+      const result = await runAgentAction<{ models?: string[] }>({ action: "models-list" });
+      const models = (result.models ?? []).map((entry) => String(entry)).filter(Boolean);
+      setGatewayModels(models);
+      if (!gatewaySelectedChatModel && models.length > 0) {
+        setGatewaySelectedChatModel(models[0]);
+      }
+      if (!gatewayAgentDefaultModel && models.length > 0) {
+        setGatewayAgentDefaultModel(models[0]);
+      }
+    } catch {
+      // model controls remain optional
+    }
+  };
+
+  const loadGatewayModelStatus = async (agentId = gatewaySelectedAgent) => {
+    const key = agentId.trim();
+    if (!key) {
+      setGatewayModelStatus("");
+      return;
+    }
+    try {
+      const result = await runAgentAction<{ model?: string }>({
+        action: "model-status",
+        agentId: key,
+      });
+      const model = result.model?.trim() || "";
+      setGatewayModelStatus(model);
+      if (model) {
+        setGatewaySelectedChatModel(model);
+        setGatewayAgentDefaultModel(model);
+      }
+    } catch {
+      setGatewayModelStatus("");
+    }
+  };
+
+  const setGatewayAgentModelDefault = async () => {
+    const agentId = gatewaySelectedAgent.trim();
+    const model = gatewayAgentDefaultModel.trim();
+    if (!agentId || !model) {
+      setDashboardNotice({ type: "error", message: "Select agent and model first." });
+      return;
+    }
+    try {
+      await runAgentAction({
+        action: "model-set-agent-default",
+        agentId,
+        model,
+      });
+      setGatewayModelStatus(model);
+      setDashboardNotice({ type: "success", message: "Agent default model updated." });
+    } catch (error) {
+      setDashboardNotice({ type: "error", message: error instanceof Error ? error.message : "Setting model failed" });
+    }
+  };
+
   const loadGatewaySessionHistory = async (force = false) => {
     const agentId = gatewaySelectedAgent.trim();
     const sessionId = gatewaySelectedSessionToken.trim();
@@ -2681,11 +2785,15 @@ export function OpenclawDashboard() {
 
   useEffect(() => {
     if (!gatewayConnected) return;
+    if (gatewayModels.length === 0) {
+      void loadGatewayModels();
+    }
     void loadGatewaySessions(gatewaySelectedAgent, "selected");
     if (!gatewaySelectedAgent.trim()) return;
+    void loadGatewayModelStatus(gatewaySelectedAgent);
     void loadGatewayCoreFiles();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gatewayConnected, gatewaySelectedAgent]);
+  }, [gatewayConnected, gatewaySelectedAgent, gatewayModels.length]);
 
   useEffect(() => {
     if (!gatewaySelectedAgent.trim()) {
@@ -4246,6 +4354,27 @@ export function OpenclawDashboard() {
                           );
                         })}
                       </div>
+                      <Separator />
+                      <div className="space-y-2">
+                        <p className="text-xs font-medium text-muted-foreground">Agent Default Model</p>
+                        <div className="flex items-center gap-2">
+                          <select
+                            value={gatewayAgentDefaultModel}
+                            onChange={(event) => setGatewayAgentDefaultModel(event.target.value)}
+                            className="h-8 flex-1 rounded-md border bg-background px-2 text-xs"
+                          >
+                            {gatewayModels.map((model) => (
+                              <option key={model} value={model}>
+                                {model}
+                              </option>
+                            ))}
+                          </select>
+                          <Button size="sm" variant="outline" onClick={() => void setGatewayAgentModelDefault()}>
+                            Save
+                          </Button>
+                        </div>
+                        <p className="text-[11px] text-muted-foreground">Current: {gatewayModelStatus || "n/a"}</p>
+                      </div>
                     </CardContent>
                   </Card>
 
@@ -4268,16 +4397,37 @@ export function OpenclawDashboard() {
                       {gatewaySessions.length === 0 && <p className="text-muted-foreground">No sessions loaded yet.</p>}
                       <ScrollArea className="h-[180px] rounded-md border p-2">
                         <div className="space-y-1">
-                          {gatewaySessions.map((session, idx) => (
-                            <div key={`${session.id || session.key || idx}`} className="rounded-md border p-2">
-                              <p className="font-medium">{session.key || session.id || "Session"}</p>
-                              <p className="text-xs text-muted-foreground">
-                                {session.state || "unknown state"}
-                                {session.agent ? ` • ${session.agent}` : ""}
-                                {session.updatedAt ? ` • ${session.updatedAt}` : ""}
-                              </p>
-                            </div>
-                          ))}
+                          {gatewaySessions.map((session, idx) => {
+                            const token = sessionToken(session, idx);
+                            const selected = token === gatewaySelectedSessionToken;
+                            return (
+                              <div key={token} className={cn("rounded-md border p-2", selected ? "bg-primary/5" : "")}>
+                                <div className="flex items-start justify-between gap-2">
+                                  <button
+                                    type="button"
+                                    className="min-w-0 flex-1 text-left"
+                                    onClick={() => setGatewaySelectedSessionId(token)}
+                                  >
+                                    <p className="truncate font-medium">{session.key || session.id || "Session"}</p>
+                                    <p className="text-xs text-muted-foreground">
+                                      {session.state || "unknown state"}
+                                      {session.agent ? ` • ${session.agent}` : ""}
+                                      {session.updatedAt ? ` • ${format(new Date(session.updatedAt), "HH:mm:ss")}` : ""}
+                                    </p>
+                                  </button>
+                                  <Button
+                                    size="icon"
+                                    variant="ghost"
+                                    className="h-7 w-7 text-rose-400 hover:text-rose-300"
+                                    onClick={() => void deleteGatewaySession(session, idx)}
+                                    aria-label="Delete session"
+                                  >
+                                    <Trash2 className="h-4 w-4" />
+                                  </Button>
+                                </div>
+                              </div>
+                            );
+                          })}
                         </div>
                       </ScrollArea>
                       <p className="text-xs text-muted-foreground">Connected nodes: {gatewayNodes.length}</p>
@@ -4397,6 +4547,22 @@ export function OpenclawDashboard() {
                         <RefreshCw className="h-4 w-4" />
                       </Button>
                     </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <p className="text-xs text-muted-foreground">Model</p>
+                    <select
+                      value={gatewaySelectedChatModel}
+                      onChange={(event) => setGatewaySelectedChatModel(event.target.value)}
+                      className="h-8 min-w-[280px] rounded-md border bg-background px-2 text-xs"
+                    >
+                      {gatewayModels.map((model) => (
+                        <option key={model} value={model}>
+                          {model}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-[11px] text-muted-foreground">Active: {gatewayModelStatus || "n/a"}</p>
                   </div>
 
                   <ScrollArea className="h-[520px] rounded-lg border bg-zinc-950 p-3 text-xs text-zinc-200">
